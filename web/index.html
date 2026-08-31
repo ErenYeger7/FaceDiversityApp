@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FaceDiversityApp</title>
+<style>
+  :root{
+    --bg:#1b1e24; --panel:#232730; --panel2:#2b3039; --line:#39404c; --ink:#e7eaf0; --dim:#9aa4b2;
+    --accent:#5b9dff; --good:#4bbf73; --warn:#e0a44b; --bad:#e0654b; --chip:#323844;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:14px/1.45 system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  h1,h2,h3{margin:0;font-weight:600}
+  header{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:14px}
+  header h1{font-size:16px}
+  header .sub{color:var(--dim);font-size:12px}
+  .app{display:grid;grid-template-columns:1.35fr 1fr 0.95fr;gap:0;height:calc(100vh - 43px)}
+  .pane{overflow:auto;padding:12px 14px;border-right:1px solid var(--line)}
+  .pane:last-child{border-right:none}
+  .pane h2{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin:2px 0 8px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:12px}
+  .row{display:flex;gap:8px;align-items:center}
+  .row.wrap{flex-wrap:wrap}
+  input[type=text],select{background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+    border-radius:6px;padding:6px 8px;font:inherit;width:100%}
+  input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px}
+  button{background:var(--panel2);border:1px solid var(--line);color:var(--ink);border-radius:6px;
+    padding:6px 10px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#08121f;font-weight:600}
+  button.primary:disabled{opacity:.5;cursor:not-allowed;background:var(--panel2);color:var(--dim)}
+  button.mini{padding:3px 7px;font-size:12px}
+  .chip{background:var(--chip);border:1px solid var(--line);border-radius:20px;padding:2px 9px;font-size:12px}
+  .badge{border-radius:5px;padding:1px 6px;font-size:11px;font-weight:600}
+  .b-keep{background:rgba(75,191,115,.16);color:var(--good);border:1px solid rgba(75,191,115,.4)}
+  .b-disable{background:rgba(224,164,75,.16);color:var(--warn);border:1px solid rgba(224,164,75,.4)}
+  .b-standalone{background:rgba(91,157,255,.16);color:var(--accent);border:1px solid rgba(91,157,255,.4)}
+  .src{display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid var(--line);
+    border-radius:7px;margin-bottom:6px;background:var(--panel2)}
+  .src .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .src select{width:auto}
+  .modpick{max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:7px;margin-top:6px}
+  .modpick .m{display:flex;gap:8px;align-items:center;padding:5px 8px;border-bottom:1px solid var(--line);font-size:12px}
+  .modpick .m:last-child{border-bottom:none}
+  .modpick .m .mn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .modpick .m.added{opacity:.5}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  thead th{position:sticky;top:0;background:var(--panel);text-align:left;color:var(--dim);
+    font-weight:600;padding:5px 6px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+  tbody td{padding:4px 6px;border-bottom:1px solid #2c313b}
+  tbody tr:hover{background:var(--panel2)}
+  tbody tr.unusable td:not(:first-child){opacity:.4}
+  .facewrap{max-height:calc(100vh - 320px);overflow:auto;border:1px solid var(--line);border-radius:7px}
+  .cov td,.cov th{padding:4px 7px;font-size:12.5px}
+  .cov .st-ok{color:var(--good)} .cov .st-skip{color:var(--bad)} .cov .st-cyc{color:var(--warn)}
+  .stat{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed #2c313b}
+  .stat b{font-variant-numeric:tabular-nums}
+  .big{font-size:22px;font-weight:700}
+  label.fld{display:block;margin:9px 0 3px;color:var(--dim);font-size:12px}
+  .muted{color:var(--dim);font-size:12px}
+  .warnbox{background:rgba(224,101,75,.1);border:1px solid rgba(224,101,75,.35);border-radius:7px;
+    padding:8px;font-size:12px;color:#f0b3a5;margin-top:8px}
+  pre.log{background:#12151a;border:1px solid var(--line);border-radius:7px;padding:10px;font-size:11.5px;
+    white-space:pre-wrap;max-height:340px;overflow:auto;margin-top:8px}
+  .flex1{flex:1}
+  .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--dim);border-top-color:var(--accent);
+    border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<script>
+// Installed FIRST so it can catch a parse error in the main script below, plus any runtime/promise error.
+window.__err = function(msg){
+  var b=document.getElementById('errbar');
+  if(!b){ b=document.createElement('div'); b.id='errbar';
+    b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:9999;background:#b3271e;color:#fff;'+
+      'padding:8px 12px;font:12px/1.45 ui-monospace,Consolas,monospace;white-space:pre-wrap;max-height:45vh;overflow:auto';
+    (document.body||document.documentElement).appendChild(b); }
+  b.textContent += msg+'\n';
+};
+window.onerror=function(m,src,ln,col,e){ window.__err('JS ERROR: '+m+'  @line '+ln+':'+col+(e&&e.stack?'\n'+e.stack:'')); };
+window.addEventListener('unhandledrejection',function(ev){
+  var r=ev.reason; window.__err('UNCAUGHT PROMISE: '+(r&&r.stack?r.stack:r)); });
+</script>
+<header>
+  <h1>FaceDiversityApp</h1>
+  <span class="sub" id="hdrSub">personal use only — do not redistribute</span>
+</header>
+
+<div class="app">
+  <!-- ===================== LEFT: sources + faces ===================== -->
+  <section class="pane">
+    <h2>⚙ Setup</h2>
+    <div class="card">
+      <div class="row" style="gap:8px">
+        <div style="width:128px"><label class="fld" style="margin-top:0">Game version</label>
+          <select id="gameVersion"></select></div>
+        <div style="flex:1"><label class="fld" style="margin-top:0">Skyrim.esm path</label>
+          <input type="text" id="gamePathInput" placeholder="…\Data\Skyrim.esm"></div>
+      </div>
+      <label class="fld">Base-game Data folder <span class="muted">(vanilla BSAs; blank = folder of Skyrim.esm — set only if your ESM is a cleaned-masters copy)</span></label>
+      <input type="text" id="gameDataInput" placeholder="…\Skyrim Special Edition\Data (auto = folder of Skyrim.esm)">
+      <label class="fld">Bodies of Tamriel — SliderPresets folder <span class="muted">(for SexPlague Bodies)</span></label>
+      <input type="text" id="botPresetsInput" placeholder="…\CalienteTools\Bodyslide\SliderPresets">
+      <div class="row" style="margin-top:8px;gap:8px;align-items:center">
+        <button class="mini" id="saveSettingsBtn">Save settings</button>
+        <span class="muted" id="settingsSaved"></span>
+      </div>
+      <div class="muted" id="profilesPath" style="margin-top:4px;font-size:11px" title="auto-derived as the sibling of the mods folder (MO2 instance layout); holds loadorder.txt/plugins.txt"></div>
+      <div class="muted" id="settingsPathNote" style="margin-top:2px;font-size:11px"></div>
+    </div>
+
+    <h2>1 · Source mods</h2>
+    <div class="card">
+      <label class="fld" style="margin-top:0">MO2 mods folder</label>
+      <input type="text" id="modsPath" placeholder="C:\Modlists\SME\mods">
+      <div class="row" style="margin-top:8px;gap:8px">
+        <div style="flex:1"><label class="fld" style="margin-top:0">MO2 profile</label>
+          <select id="profile"><option value="">(all folders — ignore profile)</option></select></div>
+      </div>
+      <label class="row" style="margin-top:8px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="onlyEnabled" checked>
+        <span>Only mods enabled in this profile <span class="muted" id="enCount"></span></span>
+      </label>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="modSearch" placeholder="filter listed mods…">
+        <button class="mini" id="rescanBtn">Rescan</button>
+      </div>
+      <div class="modpick" id="modPick"><div class="muted" style="padding:8px">Scanning installed mods…</div></div>
+    </div>
+
+    <div id="activeSources"></div>
+
+    <h2 style="margin-top:14px">2 · Faces <span class="muted" id="faceCount"></span></h2>
+    <div class="card">
+      <div class="row wrap" style="margin-bottom:8px">
+        <select id="sourceFilter" style="width:auto"><option value="">all mods</option></select>
+        <select id="genderFilter" style="width:auto">
+          <option value="">both genders</option>
+          <option value="F">female faces</option>
+          <option value="M">male faces</option>
+        </select>
+        <select id="raceFilter" style="width:auto"><option value="">all races</option></select>
+        <input type="text" id="faceSearch" class="flex1" placeholder="search EditorID…" style="min-width:110px">
+      </div>
+      <div class="row wrap" style="margin-bottom:8px">
+        <button class="mini" id="selUsable" title="select only faces this category can use (right race + gender)">Usable</button>
+        <button class="mini" id="selAll">All</button>
+        <button class="mini" id="selNone">None</button>
+        <button class="mini" id="selInvert">Invert</button>
+        <button class="mini" id="selRace">Select filtered</button>
+        <button class="mini" id="unselRace" title="deselect the faces currently shown by the filters — e.g. filter to one race to exclude it">Unselect filtered</button>
+        <span class="muted flex1" style="text-align:right" id="selCount"></span>
+      </div>
+      <div class="facewrap">
+        <table id="faceTable">
+          <thead><tr>
+            <th style="width:26px"></th><th data-k="editorID">Face (EditorID)</th>
+            <th data-k="sex" style="width:34px">Sex</th>
+            <th data-k="poolRace">Race</th><th data-k="source">Source</th>
+          </tr></thead>
+          <tbody id="faceBody"><tr><td colspan="5" class="muted" style="padding:10px">Add a source mod above to list its faces.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== MIDDLE: coverage ===================== -->
+  <section class="pane">
+    <h2>3 · Coverage preview</h2>
+    <div class="card">
+      <div class="row" style="gap:16px;margin-bottom:8px">
+        <div><div class="muted">Selected faces</div><div class="big" id="kSel">0</div></div>
+        <div><div class="muted">Targets covered</div><div class="big" id="kCov">0</div></div>
+        <div><div class="muted">Skipped</div><div class="big" id="kSkip">0</div></div>
+      </div>
+      <div class="stat"><span>Category targets (own-traits)</span><b id="kTargets">0</b></div>
+      <div class="stat"><span>Selected faces usable here <span class="muted" id="usableNote"></span></span><b id="kUsable">0</b></div>
+      <div class="stat"><span>Distinct faces placed in-game</span><b id="kPlaced">0</b></div>
+      <div class="stat"><span id="lblResult">Result — all female</span><b id="kResult">0</b></div>
+      <div class="stat"><span id="lblFem">…of which feminized males</span><b id="kFem">0</b></div>
+      <div id="covWarn"></div>
+      <div id="covExtra"></div>
+    </div>
+    <div class="card">
+      <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">PER-RACE</h3>
+      <table class="cov"><thead><tr>
+        <th>Race</th><th>code</th><th style="text-align:right">M tgt</th><th style="text-align:right">F tgt</th>
+        <th style="text-align:right">faces</th><th>result</th>
+      </tr></thead><tbody id="covBody"></tbody></table>
+    </div>
+  </section>
+
+  <!-- ===================== RIGHT: settings + create ===================== -->
+  <section class="pane">
+    <h2>4 · Output</h2>
+    <div class="card">
+      <label class="fld">Category</label>
+      <select id="category"></select>
+      <div class="muted" id="catNote" style="margin-top:4px"></div>
+      <div class="warnbox hidden" id="scanWarn" style="margin-top:6px"></div>
+
+      <label class="fld">Output mod name (.esp)</label>
+      <input type="text" id="outName" value="AllFemaleBandits.esp">
+
+      <label class="fld">Output folder</label>
+      <input type="text" id="outDir" placeholder="(default: out/<name>)">
+
+      <label class="row" style="margin-top:12px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="feminize" checked>
+        <span>Feminize male targets (Female flag + voice remap)</span>
+      </label>
+
+      <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="boost">
+        <span>Leveled-List Boost — place extra faces as new NPCs <span class="muted" id="boostNote"></span></span>
+      </label>
+      <div class="muted" id="boostDetail" style="margin:4px 0 0 23px"></div>
+
+      <label class="row" id="spRow" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="sexplague">
+        <span>Use SexPlague on feminized males <span class="muted" id="spNote"></span></span>
+      </label>
+      <div id="spTiers" class="hidden" style="margin:6px 0 0 23px"></div>
+
+      <label class="row" id="fnRow" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="femNames">
+        <span>Apply feminine names <span class="muted" id="fnNote"></span></span>
+      </label>
+      <div class="muted hidden" id="fnDetail" style="margin:4px 0 0 23px"></div>
+
+      <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="bakeTextures">
+        <span>Bake textures (self-contained) <span class="muted">— copy each face's brow/eye textures from any mod so nothing renders purple; larger output, skin overhauls excluded</span></span>
+      </label>
+
+      <div id="eslProj" style="margin-top:10px"></div>
+      <div class="muted" style="margin-top:8px">
+        Game: <span id="gamePath" class="chip"></span><br>
+        Sources classified automatically (override per source in the list).
+      </div>
+    </div>
+
+    <div class="card">
+      <label class="row" style="gap:8px;cursor:pointer">
+        <input type="checkbox" id="agree">
+        <span>Personal use only — I will not redistribute this mod or its harvested assets.</span>
+      </label>
+      <button class="primary" id="createBtn" style="width:100%;margin-top:10px" disabled>Create mod</button>
+      <div id="createOut"></div>
+    </div>
+
+    <div class="card">
+      <label class="fld" style="margin-top:0">Verify assets <span class="muted">— find missing/purple face textures + hidden dependency mods</span></label>
+      <div class="row" style="gap:8px">
+        <input type="text" id="auditPath" placeholder="folder of a generated/installed mod (e.g. …\mods\FDA_Bandits_F)">
+        <button class="mini" id="auditBtn">Audit</button>
+        <button class="mini hidden" id="auditCopyBtn" title="copy the full audit (all missing textures + dependency mods) to the clipboard">Copy</button>
+      </div>
+      <div id="auditOut"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+async function api(p,o){
+  let r;
+  try { r = await fetch(p,o); }
+  catch(e){ throw new Error('network fail on '+p+': '+e.message); }
+  const txt = await r.text();
+  if(!r.ok) throw new Error('HTTP '+r.status+' on '+p+': '+txt.slice(0,300));
+  try { return JSON.parse(txt); }
+  catch(e){ throw new Error('non-JSON from '+p+': '+txt.slice(0,300)); }
+}
+const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1 };
+
+// ---------- boot ----------
+(async function boot(){
+ try {
+  state.config = await api('/api/config');
+  $('#gamePath').textContent = winPath(state.config.game);
+  const cat = $('#category'); cat.innerHTML='';
+  for(const c of state.config.categories){
+    const o=document.createElement('option'); o.value=c.key;
+    o.textContent = c.label + (c.verified?'':' (unverified)');
+    o.disabled = !c.verified; cat.appendChild(o);
+  }
+  cat.value = state.config.categories.find(c=>c.verified)?.key || 'bandit';
+  cat.onchange = onCategory;
+
+  // Setup: game version + paths (portable per-PC settings)
+  const gv = $('#gameVersion'); gv.innerHTML='';
+  for(const v of (state.config.gameVersions||['SkyrimSE','SkyrimVR'])){
+    const o=document.createElement('option'); o.value=v; o.textContent=v; gv.appendChild(o);
+  }
+  gv.value = state.config.gameVersion || 'SkyrimSE';
+  $('#gamePathInput').value = winPath(state.config.game);
+  $('#gameDataInput').value = winPath(state.config.gameData);
+  $('#botPresetsInput').value = winPath(state.config.botPresets);
+  $('#profilesPath').textContent = state.config.profiles ? ('profiles (auto): '+winPath(state.config.profiles)) : '';
+  $('#settingsPathNote').textContent = state.config.settingsPath ? ('saved to: '+winPath(state.config.settingsPath)) : '';
+  $('#saveSettingsBtn').onclick = saveSettings;
+
+  // MO2 environment controls
+  $('#modsPath').value = winPath(state.config.mods);
+  const pf = $('#profile');
+  for(const p of (state.config.profileList||[])){
+    const o=document.createElement('option'); o.value=p; o.textContent=p; pf.appendChild(o);
+  }
+  if((state.config.profileList||[]).includes(state.config.profile)) pf.value = state.config.profile;
+  pf.onchange = scanMods;
+  $('#modsPath').onchange = scanMods;
+  $('#onlyEnabled').onchange = renderModPick;
+
+  await setupSexPlague();
+  await setupFemNames();
+  await onCategory();
+  await scanMods();
+ } catch(e){ window.__err('BOOT FAILED: '+(e&&e.stack?e.stack:e)); }
+})();
+
+async function setupSexPlague(){
+  try { state.sexplague = await api('/api/sexplague'); } catch { state.sexplague = {available:false}; }
+  const sp = state.sexplague, cb = $('#sexplague'), row = $('#spRow'), tiers = $('#spTiers');
+  if(!sp || !sp.available){ row.classList.add('hidden'); return; }
+  row.classList.remove('hidden');
+  if(!sp.installed){ cb.checked=false; cb.disabled=true; $('#spNote').textContent='('+sp.plugin+' not installed)'; return; }
+  $('#spNote').textContent = '('+sp.plugin+')';
+  // build one percent input per tier
+  tiers.innerHTML = sp.tiers.map((t,i)=>
+    `<label class="row" style="gap:6px;margin-bottom:4px"><span style="width:64px" class="muted">${esc(t.label)} (${esc(t.faction)})</span>`+
+    `<input type="number" min="0" max="100" value="${t.percent}" data-tier="${i}" class="spPct" style="width:70px">%</label>`).join('')
+    + `<div class="muted" id="spSum"></div>`;
+  tiers.querySelectorAll('.spPct').forEach(inp=> inp.oninput = spSumCheck);
+  cb.onchange = ()=>{ tiers.classList.toggle('hidden', !cb.checked); refreshName(); };
+  spSumCheck();
+}
+async function setupFemNames(){
+  try { state.femnames = await api('/api/femnames'); } catch { state.femnames = {available:false,count:0}; }
+  const fn = state.femnames, cb = $('#femNames');
+  if(!fn || !fn.available){ cb.checked=false; cb.disabled=true; $('#fnNote').textContent='(feminine_names.yaml not found)'; return; }
+  $('#fnNote').textContent = `(${fn.count} names — editable in config/feminine_names.yaml)`;
+  cb.onchange = ()=>{ $('#fnDetail').classList.toggle('hidden', !cb.checked); refreshName(); };
+}
+async function saveSettings(){
+  const btn=$('#saveSettingsBtn'), note=$('#settingsSaved');
+  const body = {
+    gameVersion: $('#gameVersion').value,
+    game: $('#gamePathInput').value.trim(),
+    gameData: $('#gameDataInput').value.trim(),
+    mods: $('#modsPath').value.trim(),
+    profile: $('#profile').value,
+    botPresets: $('#botPresetsInput').value.trim()
+  };
+  btn.disabled=true; note.textContent='saving…';
+  try{
+    const r = await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    note.textContent = '✔ saved ('+(r.gameVersion||'')+')';
+    state.config.game = body.game; state.config.gameVersion = r.gameVersion;
+    const gp=$('#gamePath'); if(gp) gp.textContent = winPath(body.game);
+    // the profiles dir is auto-derived from mods server-side — repopulate the profile list + show the path
+    if(r.profileList){
+      const pf=$('#profile');
+      pf.innerHTML = '<option value="">(all folders — ignore profile)</option>' +
+        r.profileList.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join('');
+      pf.value = r.profile || '';
+    }
+    if($('#profilesPath')) $('#profilesPath').textContent = r.profiles ? ('profiles (auto): '+winPath(r.profiles)) : '';
+    if(r.gameData) $('#gameDataInput').value = winPath(r.gameData);
+    await onCategory();   // re-read demand/boostinfo against the new game + version
+    await scanMods();     // re-scan mods with the new mods/profile
+  }catch(e){ note.textContent='✘ '+(e&&e.message?e.message:e); }
+  finally{ btn.disabled=false; setTimeout(()=>{ if(note.textContent[0]==='✔') note.textContent=''; },5000); }
+}
+function spPcts(){ return [...document.querySelectorAll('#spTiers .spPct')].map(i=>parseInt(i.value)||0); }
+
+// ---- auto output name: FDA_<Group>_F[_LL][_SP][_FN].esp (only enabled features) ----
+// Distinct group+feature combos get distinct filenames, so a new group can't silently overwrite another.
+function groupToken(){
+  const c = state.config && state.config.categories.find(x=>x.key===$('#category').value);
+  const label = (c && c.label) || $('#category').value || 'Group';
+  return label.replace(/\(.*?\)/g,' ').split(/[^A-Za-z0-9]+/).filter(Boolean)
+              .map(w=>w[0].toUpperCase()+w.slice(1)).join('') || 'Group';
+}
+function autoName(){
+  const fem = $('#feminize').checked;
+  const ll  = $('#boost').checked && !$('#boost').disabled;
+  const sp  = $('#sexplague').checked && !$('#sexplague').disabled;
+  const fn  = $('#femNames').checked && !$('#femNames').disabled;
+  return 'FDA_'+groupToken()+(fem?'_F':'')+(ll?'_LL':'')+(sp?'_SP':'')+(fn?'_FN':'')+'.esp';
+}
+function refreshName(){ if(state.autoName!==false) $('#outName').value = autoName(); }
+// user edits -> stop auto; clear the field -> resume auto
+$('#outName').oninput = ()=>{ state.autoName = ($('#outName').value.trim()===''); if(state.autoName) refreshName(); };
+function spSumCheck(){
+  const s = spPcts().reduce((a,b)=>a+b,0);
+  const el = $('#spSum'); if(el){ el.textContent = s===100 ? 'sum 100 ✓' : `sum ${s} — should total 100`;
+    el.style.color = s===100 ? 'var(--good)' : 'var(--warn)'; }
+}
+
+async function onCategory(){
+  const c = state.config.categories.find(x=>x.key===$('#category').value);
+  const scan = !!(c && c.scan);
+  $('#catNote').textContent = c ? (scan ? 'load-order scan — no fixed replacer' : ('known replacers: ' + (c.knownReplacers.join(', ')||'—'))) : '';
+  // Scan categories (all loaded males) touch named characters across the whole load order — make the
+  // scope and the feminization consequence explicit before the user hits Create.
+  const sw = $('#scanWarn');
+  if(scan){ sw.classList.remove('hidden');
+    sw.innerHTML = `<b>Load-order scan.</b> Substitutes every <b>unique named male</b> across your active load order (≈789 on this list) — jarls, companions, questgivers. Only races your selected faces cover are changed; the rest keep their vanilla face (skipped). With <b>Feminize</b> on, these named men become women (face + Female flag + race-matched female voice). Turning it off needs harvested <i>male</i> faces or nearly everyone skips.`;
+  } else sw.classList.add('hidden');
+  // Feminine names only match named characters — meaningful for the scan category, inert for generic Enc* ones.
+  const fnAvail = state.femnames && state.femnames.available;
+  if(fnAvail){ $('#fnNote').textContent = scan ? `(${state.femnames.count} names — editable in config/feminine_names.yaml)`
+                                                 : '(named categories only — generic NPCs won\'t match)'; }
+  $('#fnDetail').textContent = scan ? 'Feminized males get a feminine display name via SkyPatcher (e.g. Ulfric → Ulfrica). Requires SkyPatcher enabled.' : '';
+  try { state.demand = await api('/api/demand?category='+encodeURIComponent($('#category').value)); }
+  catch { state.demand = []; }
+  try { state.boostInfo = await api('/api/boostinfo?category='+encodeURIComponent($('#category').value)); }
+  catch { state.boostInfo = {boostable:false,lists:0}; }
+  const bEl = $('#boost');
+  if(!state.boostInfo.boostable){ bEl.checked=false; bEl.disabled=true; $('#boostNote').textContent = scan ? '(N/A — placed uniques, no leveled-list slots)' : '(not available — no leveled lists for this category)'; }
+  else { bEl.disabled=false; $('#boostNote').textContent=`(${state.boostInfo.lists} leveled lists)`; }
+  if(state.faces.length) renderFaces(); // usability (dimming) depends on the category's races
+  renderCoverage();
+  refreshName();  // group changed -> update the auto filename
+}
+
+// ---------- source mods ----------
+async function scanMods(){
+  $('#modPick').innerHTML = '<div class="muted" style="padding:8px">Scanning…</div>';
+  const mp = encodeURIComponent($('#modsPath').value.trim());
+  const pf = encodeURIComponent($('#profile').value); // "" => ignore profile (all folders)
+  state.mods = await api(`/api/mods?mods=${mp}&profile=${pf}`);
+  const en = state.mods.filter(m=>m.enabled).length;
+  $('#enCount').textContent = $('#profile').value ? `(${en} enabled / ${state.mods.length} installed)` : '';
+  renderModPick();
+}
+$('#rescanBtn').onclick = scanMods;
+$('#modSearch').oninput = renderModPick;
+
+function renderModPick(){
+  const q = $('#modSearch').value.toLowerCase();
+  const onlyEn = $('#onlyEnabled').checked && !!$('#profile').value;
+  const rows=[];
+  for(const m of state.mods){
+    if(onlyEn && !m.enabled) continue;
+    for(const p of m.plugins){
+      if(q && !(m.name.toLowerCase().includes(q)||p.toLowerCase().includes(q))) continue;
+      const path = m.folder + '\\' + p;
+      const added = state.sources.some(s=>s.path===path);
+      const off = (!m.enabled) ? ' <span class="muted">· off</span>' : '';
+      rows.push(`<div class="m ${added?'added':''}">
+        <span class="mn" title="${esc(m.name)}">${esc(p)} <span class="muted">— ${esc(m.name)}</span>${off}</span>
+        <button class="mini" ${added?'disabled':''} onclick="addSource('${jsq(path)}','${jsq(p)}')">Add</button></div>`);
+    }
+  }
+  $('#modPick').innerHTML = rows.length ? rows.slice(0,500).join('') :
+    '<div class="muted" style="padding:8px">no matching plugin</div>';
+}
+
+async function addSource(path, plugin){
+  if(state.sources.some(s=>s.path===path)) return;
+  const cls = await api('/api/classify?source='+encodeURIComponent(path));
+  state.sources.push({ path, plugin, mode:cls.mode, femaleNpcs:cls.femaleNpcs, why:cls.why, ownHdpt:cls.ownHdpt||0,
+    usesCustomRace:!!cls.usesCustomRace, shipsRaceTextures:!!cls.shipsRaceTextures, hasBsa:!!cls.hasBsa });
+  renderSources(); renderModPick(); await refreshFaces();
+}
+window.addSource = addSource;
+
+function removeSource(path){
+  state.sources = state.sources.filter(s=>s.path!==path);
+  renderSources(); renderModPick(); refreshFaces();
+}
+window.removeSource = removeSource;
+
+function setMode(path, mode){ const s=state.sources.find(x=>x.path===path); if(s){ s.mode=mode; renderSources(); renderCoverage(); } }
+window.setMode = setMode;
+
+const MODE_LABEL = { keep:'keep · mod stays on', disable:'disable · origin ESP off', standalone:'standalone · mod removable' };
+const MODE_HELP =
+  'keep — origin mod + its ESP stay enabled; the output masters it (references its head parts, skin & assets). '
+ +'Use when the source has custom races, ships head/skin textures, or packs assets in a BSA.\n\n'
+ +'disable — deep-copies the head-part records into this mod and bakes in the FaceGen + the exact hair/eye '
+ +'textures each face uses; you can then turn the origin ESP OFF to avoid conflicts (leave the mod itself '
+ +'enabled for its loose files; a BSA needs force-loading).\n\n'
+ +'standalone — like disable, but also bakes in ALL the source’s assets, so you can remove the origin '
+ +'mod entirely. Fully self-contained, bigger output.';
+function renderSources(){
+  const el = $('#activeSources');
+  if(!state.sources.length){ el.innerHTML=''; return; }
+  el.innerHTML = state.sources.map(s=>`
+    <div class="src">
+      <span class="badge b-${s.mode}">${s.mode.toUpperCase()}</span>
+      <span class="name" title="${esc(s.path)}\n${esc(s.why||'')}">${esc(s.plugin)} <span class="muted">· ${s.femaleNpcs} F</span></span>
+      <select title="${esc(MODE_HELP)}" onchange="setMode('${jsq(s.path)}',this.value)">
+        ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
+      </select>
+      <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
+    </div>${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
+}
+// A keep source is safe to switch to disable ONLY if the keep reason is the soft one (its BSA). Custom
+// races and shipped skin textures are hard keeps — disabling would break the face or cause a neck seam.
+function canDisable(s){ return s.mode==='keep' && !s.usesCustomRace && !s.shipsRaceTextures && s.hasBsa; }
+
+// ---------- faces ----------
+// A face is "usable" for the current category if its race is one the category actually has targets in,
+// and its gender can be assigned (feminize on -> female faces only; off -> gender-matched to a target).
+function faceUsable(f){
+  const d = state.demand.find(x=>x.race===f.poolRace);
+  if(!d) return false;                                   // no target of this race in this category
+  const fem = $('#feminize') ? $('#feminize').checked : true;
+  if(fem) return f.sex==='F';                            // males become female -> only female faces used
+  return (f.sex==='F' && d.targetF>0) || (f.sex==='M' && d.targetM>0);
+}
+
+async function refreshFaces(){
+  const prevIds = new Set(state.faces.map(f=>f.id));     // faces we already knew about
+  const prevSel = state.selected;                        // and their selection state
+  if(!state.sources.length){ state.faces=[]; state.selected=new Set(); renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage(); return; }
+  const qs = state.sources.map(s=>'source='+encodeURIComponent(s.path)).join('&');
+  state.faces = await api('/api/faces?'+qs);
+  // default: newly-added faces start selected ONLY if usable for this category; keep prior curation for
+  // faces we already had. So adding a mod selects just its usable faces, not every face it ships.
+  state.selected = new Set();
+  for(const f of state.faces){
+    const isNew = !prevIds.has(f.id);
+    if(isNew ? faceUsable(f) : prevSel.has(f.id)) state.selected.add(f.id);
+  }
+  renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage();
+}
+
+function renderSourceFilter(){
+  const srcs = [...new Set(state.faces.map(f=>f.source))].sort();
+  const cur = $('#sourceFilter').value;
+  $('#sourceFilter').innerHTML = '<option value="">all mods</option>' +
+    srcs.map(s=>`<option value="${esc(s)}">${esc(s.replace(/\.esp$/i,''))} (${state.faces.filter(f=>f.source===s).length})</option>`).join('');
+  if(srcs.includes(cur)) $('#sourceFilter').value = cur;
+}
+
+function renderRaceFilter(){
+  const races = [...new Set(state.faces.map(f=>f.poolRace))].sort();
+  const cur = $('#raceFilter').value;
+  $('#raceFilter').innerHTML = '<option value="">all races</option>' +
+    races.map(r=>`<option value="${esc(r)}">${esc(r)} (${state.faces.filter(f=>f.poolRace===r).length})</option>`).join('');
+  if(races.includes(cur)) $('#raceFilter').value = cur;
+}
+
+function visibleFaces(){
+  const src = $('#sourceFilter').value, g = $('#genderFilter').value, r = $('#raceFilter').value, q = $('#faceSearch').value.toLowerCase();
+  return state.faces.filter(f =>
+    (!src || f.source===src) &&
+    (!g || f.sex===g) &&
+    (!r || f.poolRace===r) &&
+    (!q || (f.editorID||'').toLowerCase().includes(q) || f.source.toLowerCase().includes(q)));
+}
+
+function renderFaces(){
+  const rows = visibleFaces();
+  $('#faceCount').textContent = state.faces.length ? `· ${rows.length} shown / ${state.faces.length} total` : '';
+  const k = state.sortK;
+  if(k) rows.sort((a,b)=>(''+(a[k]||'')).localeCompare(''+(b[k]||''))*state.sortDir);
+  $('#faceBody').innerHTML = rows.length ? rows.map(f=>`
+    <tr class="${faceUsable(f)?'':'unusable'}" title="${faceUsable(f)?'':'not used by this category (wrong race/gender)'}">
+      <td><input type="checkbox" ${state.selected.has(f.id)?'checked':''} onchange="tog('${jsq(f.id)}',this.checked)"></td>
+      <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}</td>
+      <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
+      <td>${esc(f.poolRace)}</td>
+      <td class="muted" title="${esc(f.source)}">${esc(f.source.replace(/\.esp$/i,''))}</td>
+    </tr>`).join('') :
+    '<tr><td colspan="5" class="muted" style="padding:10px">no faces match the filter.</td></tr>';
+  updateSelCount();
+}
+
+function tog(id,on){ on?state.selected.add(id):state.selected.delete(id); updateSelCount(); renderCoverage(); }
+window.tog = tog;
+function updateSelCount(){ $('#selCount').textContent = `${state.selected.size} / ${state.faces.length} selected`; }
+
+$('#sourceFilter').onchange = renderFaces;
+$('#genderFilter').onchange = renderFaces;
+$('#raceFilter').onchange = renderFaces;
+$('#faceSearch').oninput = renderFaces;
+$('#selUsable').onclick = ()=>{ state.selected = new Set(state.faces.filter(faceUsable).map(f=>f.id)); renderFaces(); renderCoverage(); };
+$('#selAll').onclick   = ()=>{ state.faces.forEach(f=>state.selected.add(f.id)); renderFaces(); renderCoverage(); };
+$('#selNone').onclick  = ()=>{ state.selected.clear(); renderFaces(); renderCoverage(); };
+$('#selInvert').onclick = ()=>{ state.faces.forEach(f=> state.selected.has(f.id)?state.selected.delete(f.id):state.selected.add(f.id)); renderFaces(); renderCoverage(); };
+$('#selRace').onclick  = ()=>{ visibleFaces().forEach(f=>state.selected.add(f.id)); renderFaces(); renderCoverage(); };
+$('#unselRace').onclick = ()=>{ visibleFaces().forEach(f=>state.selected.delete(f.id)); renderFaces(); renderCoverage(); };
+document.querySelectorAll('#faceTable thead th[data-k]').forEach(th=>{
+  th.onclick = ()=>{ const k=th.dataset.k; state.sortDir = state.sortK===k?-state.sortDir:1; state.sortK=k; renderFaces(); };
+});
+
+// ---------- coverage ----------
+// selected faces grouped by race, split by gender
+function selectedByRaceSex(){
+  const m={};
+  for(const f of state.faces) if(state.selected.has(f.id)){
+    (m[f.poolRace] ||= {F:0,M:0})[f.sex]++;
+  }
+  return m;
+}
+function renderCoverage(){
+  const fem = $('#feminize') ? $('#feminize').checked : true;
+  const sup = selectedByRaceSex();
+  let tgt=0,result=0,skip=0,feminized=0,maleKept=0,usable=0,placed=0;
+  const shortRaces=[];
+  const rows = state.demand.map(d=>{
+    const g = sup[d.race]||{F:0,M:0}; const sF=g.F, sM=g.M;
+    // female faces serve F targets + (when feminizing) M targets; male faces serve M targets otherwise.
+    const femNeed = d.targetF + (fem ? d.targetM : 0);
+    const maleNeed = fem ? 0 : d.targetM;
+    let res=0;
+    if(femNeed>0 && sF>0){ res+=femNeed; if(fem) feminized+=d.targetM; }
+    if(maleNeed>0 && sM>0){ res+=maleNeed; maleKept+=d.targetM; }
+    const need = d.targetM+d.targetF;
+    tgt+=need; result+=res; skip+=(need-res);
+    // selected faces that COULD serve this race, vs. distinct faces that actually get placed (1 per
+    // target slot — round-robin, so #distinct placed = min(faces, target slots of that gender)).
+    if(fem){ usable += sF; placed += Math.min(sF, femNeed); }
+    else { usable += (d.targetF>0?sF:0)+(d.targetM>0?sM:0); placed += Math.min(sF,d.targetF)+Math.min(sM,d.targetM); }
+    if(res<need) shortRaces.push(d.name||d.race);
+    const facesCell = fem ? `${sF}` : `${sF}F ${sM}M`;
+    let st;
+    if(res===0) st=`<span class="st-skip">skip (no ${fem?'female':'matching'} face)</span>`;
+    else if(res<need) st=`<span class="st-cyc">partial · ${res}/${need}</span>`;
+    else st=`<span class="st-ok">ok</span>`;
+    return `<tr><td>${esc(d.name||d.race)}</td><td class="muted" style="font-size:11px" title="race FormID">${esc(d.code||'')}</td>
+      <td style="text-align:right">${d.targetM}</td>
+      <td style="text-align:right">${d.targetF}</td><td style="text-align:right">${facesCell}</td><td>${st}</td></tr>`;
+  });
+  $('#covBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">no demand data</td></tr>';
+  const unused = state.selected.size - usable;
+  $('#kSel').textContent = state.selected.size;
+  $('#kCov').textContent = result; $('#kSkip').textContent = skip;
+  $('#kTargets').textContent = tgt; $('#kResult').textContent = result;
+  $('#kUsable').textContent = usable;
+  $('#usableNote').textContent = unused > 0 ? `(+${unused} selected can't be used here)` : '';
+  $('#kPlaced').textContent = placed;
+  const extra = usable - placed; // usable faces that have no vanilla slot to appear in
+  const boostOn = $('#boost') && $('#boost').checked;
+  const boostable = state.boostInfo && state.boostInfo.boostable;
+
+  // Projected plugin type: only NEW records count against the 2048 ESPFE limit — head parts deep-copied
+  // from disable/standalone sources (keep-mode references them) + boost clones. Overrides don't count.
+  const hdptNew = state.sources.filter(s=>s.mode==='disable'||s.mode==='standalone').reduce((a,s)=>a+(s.ownHdpt||0),0);
+  const boostNew = (boostOn && boostable) ? extra : 0;
+  const newRecs = hdptNew + boostNew;
+  const esl = newRecs <= 2048;
+  $('#eslProj').innerHTML = state.sources.length ?
+    `<div class="warnbox" style="${esl?'background:rgba(75,191,115,.08);border-color:rgba(75,191,115,.3);color:#b6e6c6'
+                                     :'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
+    + `Projected output: <b>${esl?'ESPFE (ESL-flagged)':'FULL ESP'}</b> · <b>${newRecs}</b> new record${newRecs===1?'':'s'}`
+    + (boostNew>0?` (${hdptNew} head parts + ${boostNew} boost NPCs)`:` (head parts)`)
+    + (esl?` — fits the 2048 ESPFE limit.`
+          :` — exceeds 2048, so it ships as a full ESP (one load-order slot). To keep it ESPFE, use fewer disable/standalone sources or switch some to <b>keep</b> mode.`)
+    + `</div>` : '';
+
+  let msg = '';
+  if(extra > 0){
+    if(boostOn && boostable) msg =
+      `<div class="warnbox" style="background:rgba(75,191,115,.1);border-color:rgba(75,191,115,.35);color:#b6e6c6"><b>${extra}</b> extra faces will be placed as NEW NPCs, injected into the leveled lists via SkyPatcher.</div>`;
+    else if(boostable) msg =
+      `<div class="warnbox" style="background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff"><b>${extra}</b> usable faces have no vanilla slot (only <b>${tgt}</b>). Enable <b>Leveled-List Boost</b> to place them as new NPCs.</div>`;
+    else msg =
+      `<div class="warnbox"><b>${extra}</b> usable faces have no vanilla slot (only <b>${tgt}</b>), and this category can't be boosted (no leveled lists) — they won't appear.</div>`;
+  }
+  $('#covExtra').innerHTML = msg;
+  $('#boostDetail').textContent = (boostOn && boostable && extra>0) ? `≈ ${extra} new NPCs will be added — requires SkyPatcher enabled.` : '';
+  $('#lblResult').textContent = fem ? 'Result — all female' : 'Result — faces applied';
+  $('#lblFem').textContent = fem ? '…of which feminized males' : '…male targets kept male';
+  $('#kFem').textContent = fem ? feminized : maleKept;
+  $('#covWarn').innerHTML = shortRaces.length ?
+    `<div class="warnbox">Not fully covered: <b>${shortRaces.map(esc).join(', ')}</b>. Those targets keep their vanilla face (counted as skipped). Add more ${fem?'female':'matching-gender'} faces for these races.</div>` : '';
+}
+
+// ---------- create ----------
+$('#feminize').onchange = ()=>{ if(state.faces.length) renderFaces(); renderCoverage(); refreshName(); }; // usability depends on feminize
+$('#boost').onchange = ()=>{ renderCoverage(); refreshName(); };
+$('#agree').onchange = ()=> $('#createBtn').disabled = !$('#agree').checked;
+$('#createBtn').onclick = async ()=>{
+  if(!state.sources.length){ alert('Add at least one source mod.'); return; }
+  const spOn = $('#sexplague').checked;
+  if(spOn && spPcts().reduce((a,b)=>a+b,0)!==100){ alert('SexPlague tier percentages must total 100.'); return; }
+  const btn=$('#createBtn'); btn.disabled=true;
+  $('#createOut').innerHTML = `<div class="muted" style="margin-top:8px"><span class="spin"></span> generating… (this can take a minute for large sources)</div>`;
+  const body = {
+    category: $('#category').value,
+    sources: state.sources.map(s=>({ path:s.path, mode:s.mode })),
+    include: [...state.selected], // selection is authoritative (empty => nothing)
+    name: $('#outName').value.trim(),
+    out: $('#outDir').value.trim() || null,
+    feminize: $('#feminize').checked,
+    boost: $('#boost').checked,
+    sexplague: spOn,
+    sexplaguePct: spOn ? spPcts() : null,
+    feminineNames: $('#femNames').checked,
+    bakeTextures: $('#bakeTextures').checked
+  };
+  let res;
+  try { res = await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
+  catch(e){ res = { ok:false, log:'request failed: '+e }; }
+  btn.disabled = !$('#agree').checked;
+  $('#createOut').innerHTML =
+    `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ done':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}</div>`+
+    `<pre class="log">${esc(res.log||'')}</pre>`+
+    (res.readme?`<details><summary class="muted">README.txt</summary><pre class="log">${esc(res.readme)}</pre></details>`:'');
+  if(res.ok && res.outFolder) $('#auditPath').value = winPath(res.outFolder);  // ready to verify what we just built
+};
+
+// ---------- verify assets ----------
+async function runAudit(){
+  const mod = $('#auditPath').value.trim();
+  if(!mod){ alert('Enter the folder of a generated/installed mod to audit.'); return; }
+  const btn=$('#auditBtn'), out=$('#auditOut');
+  btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:8px"><span class="spin"></span> auditing (indexing BSAs, can take a moment)…</div>';
+  let r;
+  try{ r = await api('/api/audit?mod='+encodeURIComponent(mod)); }
+  catch(e){ out.innerHTML='<div class="warnbox" style="margin-top:8px">✘ '+esc(e&&e.message?e.message:e)+'</div>'; btn.disabled=false; return; }
+  state.lastAudit = { r, mod }; $('#auditCopyBtn').classList.remove('hidden');   // enable full-copy (list truncates below)
+  const deps = Object.entries(r.byMod||{}).map(([m,c])=>`<div>${c} · ${esc(m)}</div>`).join('');
+  const disabled = Object.entries(r.inDisabled||{}).map(([m,c])=>`<div>${c} · ${esc(m)}</div>`).join('');
+  const bySrc = Object.entries(r.missingBySource||{}).slice(0,50).map(([s,c])=>`<div>${c} · ${esc(winPath('textures\\'+s+'\\'))}</div>`).join('');
+  const miss = (r.missingList||[]).slice(0,80).map(f=>{
+    const fix = f.inDisabled
+      ? ` <span style="color:#b6e6c6">→ enable ${esc(f.inDisabled)}</span>`
+      : ` <span class="muted">→ install pack for ${esc(winPath('textures\\'+(f.source||'')+'\\'))}</span>`;
+    return `<div>${esc(winPath(f.texture))}${fix}${f.face?(' <span class="muted">['+esc(f.face)+']</span>'):''}</div>`;
+  }).join('');
+  const ok = !r.missing;
+  const canary = (r.stockOk===false)
+    ? `<div class="warnbox" style="margin-top:8px;background:rgba(255,176,72,.12);border-color:rgba(255,176,72,.45);color:#ffd9a3">⚠ Base-game textures NOT found at <b>${esc(winPath(r.stockFolder||''))}</b> — vanilla textures show as false "missing". Set the <b>Base-game Data folder</b> above to the install that has <code>Skyrim - Textures*.bsa</code>, Save, and re-audit.</div>`
+    : '';
+  out.innerHTML = canary +
+    `<div class="warnbox" style="margin-top:8px;${ok?'background:rgba(75,191,115,.1);border-color:rgba(75,191,115,.35);color:#b6e6c6':''}">`
+    +`<b>${r.missing}</b> missing diffuse (render purple) · ${r.inMod} baked · ${r.deps} from other mods `
+    +`<span class="muted">(${r.distinct} textures, ${r.nifs} NIFs, searched ${r.modFolders} mods${r.missingSecondary?'; +'+r.missingSecondary+' secondary maps missing — harmless':''})</span></div>`
+    +(disabled?`<div style="margin-top:6px;color:#b6e6c6"><b>✔ Fixable — ENABLE these DISABLED mods</b> <span class="muted">(they contain missing textures)</span>:</div><pre class="log" style="max-height:130px">${disabled}</pre>`:'')
+    +(bySrc?`<div style="margin-top:6px"><b>Missing by source</b> <span class="muted">— the pack / NPC folder that provides each (what to install)</span>:</div><pre class="log" style="max-height:170px">${bySrc}</pre>`:'')
+    +(deps?`<div style="margin-top:6px">Keep these mods enabled <span class="muted">— texture dependencies, most are NOT plugin masters</span>:</div><pre class="log" style="max-height:130px">${deps}</pre>`:'')
+    +(r.missing?`<div style="margin-top:6px;color:var(--warn)"><b>MISSING diffuse</b> <span class="muted">— full path → fix · [replaced NPC]; render purple</span>:</div><pre class="log" style="max-height:180px">${miss}${r.missing>80?'\n(+'+(r.missing-80)+' more — use Copy for the full list)':''}</pre>`:'');
+  btn.disabled=false;
+}
+$('#auditBtn').onclick = runAudit;
+// Build the FULL audit as plain text and copy it (the on-screen list is truncated).
+async function copyAudit(){
+  const la = state.lastAudit; if(!la){ return; }
+  const r = la.r;
+  const lines = [];
+  lines.push('FaceDiversityApp asset audit — '+la.mod);
+  lines.push(`NIFs ${r.nifs} · distinct textures ${r.distinct} · searched ${r.modFolders} mods · base-game folder ${winPath(r.stockFolder||'')} (found=${r.stockOk})`);
+  lines.push(`baked ${r.inMod} · from other mods ${r.deps} · MISSING diffuse ${r.missing} · secondary missing ${r.missingSecondary}`);
+  lines.push('');
+  lines.push('FIXABLE — ENABLE these DISABLED mods (they contain missing textures):');
+  for(const [m,c] of Object.entries(r.inDisabled||{})) lines.push(`  ${c}\t${m}`);
+  lines.push('');
+  lines.push('MISSING BY SOURCE (pack / NPC-face folder to install):');
+  for(const [srcp,c] of Object.entries(r.missingBySource||{})) lines.push(`  ${c}\ttextures\\${srcp}\\`);
+  lines.push('');
+  lines.push('TEXTURE-DEPENDENCY MODS (keep enabled):');
+  for(const [m,c] of Object.entries(r.byMod||{})) lines.push(`  ${c}\t${m}`);
+  lines.push('');
+  lines.push(`MISSING DIFFUSE (${r.missing}) — full path <TAB> fix <TAB> [replaced NPC]; render purple:`);
+  for(const f of (r.missingList||[])){
+    const fix = f.inDisabled ? ('ENABLE '+f.inDisabled) : ('install pack for textures\\'+(f.source||'')+'\\');
+    lines.push(`  ${winPath(f.texture)}\t${fix}\t${f.face?('['+f.face+']'):''}`);
+  }
+  const text = lines.join('\r\n');
+  const btn=$('#auditCopyBtn');
+  try{ await navigator.clipboard.writeText(text); btn.textContent='Copied ✓'; }
+  catch(_){ // clipboard API can be blocked; fall back to a selectable textarea
+    const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); btn.textContent='Copied ✓'; }catch(e2){ btn.textContent='Copy failed'; } ta.remove();
+  }
+  setTimeout(()=>{ btn.textContent='Copy'; }, 2500);
+}
+$('#auditCopyBtn').onclick = copyAudit;
+
+// ---------- utils ----------
+function esc(s){ return (''+s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// Display paths natively (Windows backslashes) so they match Explorer + the output folder and paste cleanly.
+function winPath(p){ return (p==null?'':(''+p)).replace(/\//g,'\\'); }
+function jsq(s){ return (''+s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# sexplague_bodies.yaml — maps the SexPlague plague-stage factions to Bodies of Tamriel (3BA) preset
+# pools, filtered by the BOT classification chart embedded in each preset name:
+#     ((Cup-Shape[-Feature...]-Mileage) PresetName - Author
+# Emitted as an OBody NG Preset Distribution Assistant INI (factionFemale rules) shipped in the
+# "SexPlague Bodies" mod. OBody then rolls a random preset from each faction's pool for its members.
+#
+# The plague PROGRESSES across the three stages: bigger cups, more "mileage" (pussy openness), and more
+# exaggerated hourglass as it advances. Edit the tiers and regenerate; each filter is cup AND mileage
+# AND NOT excluded-feature (a preset must satisfy all three to land in a tier).
+#
+#   Cup    (small -> large):   AA  BB  CC  DD  EE  FF  HH  OO
+#   Mileage(closed -> open):   VP  CP  AP  OP  OPX
+#   Feature codes:             Nips  Inv  Sag  Fat  HG  HGX      (HG / HGX = hourglass, waist caved in)
+sexplague_bodies:
+  faction_plugin: SexPlagueFactions.esp
+  # PDA write mode:  "*" = keep-only (each faction's pool becomes EXACTLY this list — authoritative,
+  # idempotent on re-run);  "" (empty) = add (append to whatever is already assigned).
+  mode: "*"
+  tiers:
+    - faction: SexPlague_begin       # early stage — small, unexaggerated, closed
+      cups: [AA, BB]
+      mileage: [VP, CP]
+      exclude_features: [HG, HGX]
+    - faction: SexPlague_mid         # mid stage — fuller, some hourglass, opening up
+      cups: [CC, DD]
+      mileage: [CP, AP]
+      exclude_features: [HGX]
+    - faction: SexPlague_adv         # advanced — large, exaggerated hourglass, open
+      cups: [EE, FF, HH, OO]
+      mileage: [AP, OP, OPX]
+      exclude_features: []

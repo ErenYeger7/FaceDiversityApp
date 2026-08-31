@@ -1,0 +1,461 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+
+// Local web UI host. A tiny HttpListener (BCL only) serves the static 3-pane frontend and a JSON API
+// that reuses the engine (Classify / Faces / Generate). Single-user, single-threaded request loop:
+// requests are handled one at a time, so redirecting Console during a generate can't race.
+static class Serve
+{
+    static readonly JsonSerializerOptions J = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never
+    };
+
+    // live paths (from config/settings.json, else the built-in SME fallback; all overridable via flags)
+    static string Game = "", Mods = "", Config = "", VoiceMap = "", WebRoot = "", OutDir = "",
+                  Profiles = "", Profile = "", BotPresets = "", GameData = "";
+
+    // built-in fallbacks so the app still runs on this PC even with no settings.json
+    const string DefGame = "C:/Modlists/SME/Stock Game/Data/Skyrim.esm";
+    const string DefMods = "C:/Modlists/SME/mods";
+    const string DefProfile = "Skyrim Modding Essentials";
+    const string DefBot = "C:/Modlists/SME/mods/600+ 3BA Bodies of Tamriel/CalienteTools/Bodyslide/SliderPresets";
+    static string Def(string v, string fallback) => string.IsNullOrWhiteSpace(v) ? fallback : v;
+    // Store paths with forward slashes: consistent, and safe to hand-edit in settings.json (a lone '\'
+    // is an invalid JSON escape). Windows + .NET + Mutagen all accept '/' paths, so this is display/
+    // storage only — the UI renders them back as native '\' for copy-paste.
+    static string Norm(string p) => string.IsNullOrEmpty(p) ? p : p.Replace('\\', '/');
+
+    // An MO2 instance keeps mods/ and profiles/ as SIBLINGS, so the profiles dir is derivable from the
+    // mods dir. This is what makes moving to another PC "just work" when only the mods path is set — the
+    // profiles path (which holds loadorder.txt/plugins.txt the scan needs) follows automatically.
+    static string DeriveProfiles(string mods)
+    {
+        var parent = Path.GetDirectoryName(Path.GetFullPath(mods.TrimEnd('/', '\\')));
+        return parent is null ? mods : Path.Combine(parent, "profiles");
+    }
+    // Use an explicit profiles path only when set AND it exists; otherwise derive from mods.
+    static string ResolveProfiles(string explicitProfiles, string mods)
+        => !string.IsNullOrWhiteSpace(explicitProfiles) && Directory.Exists(explicitProfiles)
+           ? explicitProfiles : DeriveProfiles(mods);
+
+    public static int Run(string[] args)
+    {
+        int port = 8930; // avoid DevBench 8920/8921
+        var home = AppHome();
+        var s = Settings.Current;                 // already loaded (+ GameCfg.Release set) in Program.cs
+        Game = Def(s.Game, DefGame);
+        Mods = Def(s.Mods, DefMods);
+        Profiles = ResolveProfiles(s.Profiles, Mods);   // auto-derive from mods if not explicitly valid
+        Profile = Def(s.Profile, DefProfile);
+        BotPresets = Def(s.BotPresets, DefBot);
+        // Base-game Data folder (vanilla BSAs). Defaults to the folder of Game — correct when Skyrim.esm
+        // sits with its textures (normal Steam install, and the SME Stock Game). Overridable for the rare
+        // split where the ESM you point at is a cleaned-masters copy separate from the BSA install.
+        GameData = Def(s.GameData, Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game);
+        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
+        Config = Path.Combine(home, "config", "categories.yaml");
+        VoiceMap = Path.Combine(home, "config", "voice_map.yaml");
+        WebRoot = Path.Combine(home, "web");
+        OutDir = Path.Combine(home, "out");
+        for (int i = 1; i < args.Length; i++)
+            switch (args[i])
+            {
+                case "--game": Game = args[++i]; break;
+                case "--mods": Mods = args[++i]; break;
+                case "--profiles": Profiles = args[++i]; break;
+                case "--profile": Profile = args[++i]; break;
+                case "--bot-presets": BotPresets = args[++i]; break;
+                case "--game-version": /* handled in Program.cs */ i++; break;
+                case "--config": Config = args[++i]; break;
+                case "--voice-map": VoiceMap = args[++i]; break;
+                case "--webroot": WebRoot = args[++i]; break;
+                case "--out": OutDir = args[++i]; break;
+                case "--port": port = int.Parse(args[++i]); break;
+            }
+        Categories.Load(File.Exists(Config) ? Config : null);
+
+        // Bind both loopback hosts so either http://127.0.0.1:<port>/ or http://localhost:<port>/ works.
+        // "localhost" may need a URL ACL on some Windows setups; if the dual bind fails, fall back to the IP.
+        var listener = new HttpListener();
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+        listener.Prefixes.Add($"http://localhost:{port}/");
+        try { listener.Start(); }
+        catch (HttpListenerException)
+        {
+            listener = new HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try { listener.Start(); }
+            catch (HttpListenerException e) { Console.Error.WriteLine($"cannot bind port {port}: {e.Message}"); return 1; }
+        }
+        Console.WriteLine($"FaceDiversityApp UI  →  http://localhost:{port}/  (or http://127.0.0.1:{port}/)");
+        Console.WriteLine($"  game={Game}\n  mods={Mods}\n  webroot={WebRoot}\n  out={OutDir}");
+        Console.WriteLine("Ctrl+C to stop.");
+
+        while (true)
+        {
+            HttpListenerContext ctx;
+            try { ctx = listener.GetContext(); } catch { break; }
+            try { Handle(ctx); }
+            catch (Exception e) { TrySend(ctx, 500, "application/json", Json(new { error = e.Message })); }
+        }
+        return 0;
+    }
+
+    static void Handle(HttpListenerContext ctx)
+    {
+        var path = ctx.Request.Url!.AbsolutePath;
+        var q = ctx.Request.QueryString;
+
+        if (path.StartsWith("/api/"))
+        {
+            switch (path)
+            {
+                case "/api/config": Send(ctx, 200, "application/json", Json(ConfigPayload())); return;
+                case "/api/profiles": Send(ctx, 200, "application/json", Json(ListProfiles())); return;
+                case "/api/mods":
+                {
+                    var mp = q["mods"]; var pf = q["profile"];
+                    Send(ctx, 200, "application/json",
+                        Json(ScanMods(string.IsNullOrWhiteSpace(mp) ? Mods : mp!,
+                                      pf is null ? Profile : (pf.Length == 0 ? null : pf)))); return;
+                }
+                case "/api/classify":
+                {
+                    var src = q["source"];
+                    if (src is null) { Send(ctx, 400, "application/json", Json(new { error = "source required" })); return; }
+                    Send(ctx, 200, "application/json", Json(Classify.Inspect(src))); return;
+                }
+                case "/api/faces":
+                {
+                    var srcs = q.GetValues("source") ?? Array.Empty<string>();
+                    Send(ctx, 200, "application/json", Json(Faces.Enumerate(Game, srcs))); return;
+                }
+                case "/api/demand":
+                {
+                    var cat = q["category"] ?? "bandit";
+                    try
+                    {
+                        var d = Categories.IsScan(cat)
+                            ? Faces.DemandLoadOrder(Game, ResolveActiveLoadOrder())
+                            : Faces.Demand(Game, cat);
+                        Send(ctx, 200, "application/json", Json(d));
+                    }
+                    catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
+                case "/api/boostinfo":
+                {
+                    var cat = q["category"] ?? "bandit";
+                    try
+                    {
+                        // Scan categories (all_males) can't be boosted — placed uniques, no leveled-list slots.
+                        if (Categories.IsScan(cat)) { Send(ctx, 200, "application/json", Json(new { boostable = false, lists = 0 })); return; }
+                        int n = Faces.BoostListCount(Game, cat);
+                        Send(ctx, 200, "application/json", Json(new { boostable = n > 0, lists = n }));
+                    }
+                    catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
+                case "/api/sexplague": Send(ctx, 200, "application/json", Json(SexPlaguePayload())); return;
+                case "/api/femnames":
+                {
+                    var p = FeminineNamesPath();
+                    int n = File.Exists(p) ? FeminineNames.Load(p).Count : 0;
+                    Send(ctx, 200, "application/json", Json(new { available = File.Exists(p), count = n })); return;
+                }
+                case "/api/audit":
+                {
+                    var m = q["mod"];
+                    if (string.IsNullOrWhiteSpace(m) || !Directory.Exists(m))
+                    { Send(ctx, 400, "application/json", Json(new { error = "mod folder not found: " + m })); return; }
+                    try { Send(ctx, 200, "application/json", Json(AssetAudit.AuditWith(m!, Mods, Profiles, Profile, GameData))); }
+                    catch (Exception e) { Send(ctx, 500, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
+                case "/api/generate" when ctx.Request.HttpMethod == "POST": HandleGenerate(ctx); return;
+                case "/api/settings" when ctx.Request.HttpMethod == "POST": HandleSettings(ctx); return;
+                default: Send(ctx, 404, "application/json", Json(new { error = "no such endpoint" })); return;
+            }
+        }
+
+        // static frontend
+        var rel = path is "/" or "" ? "index.html" : path.TrimStart('/');
+        var file = Path.GetFullPath(Path.Combine(WebRoot, rel));
+        if (!file.StartsWith(Path.GetFullPath(WebRoot), StringComparison.OrdinalIgnoreCase) || !File.Exists(file))
+        { Send(ctx, 404, "text/plain", Encoding.UTF8.GetBytes("not found")); return; }
+        Send(ctx, 200, Mime(file), File.ReadAllBytes(file));
+    }
+
+    // ---- endpoint bodies ----
+
+    static object ConfigPayload() => new
+    {
+        game = Game, mods = Mods, outDir = OutDir, voiceMap = VoiceMap,
+        profiles = Profiles, profile = Profile, profileList = ListProfiles(),
+        botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release),
+        gameVersions = new[] { "SkyrimSE", "SkyrimVR" },
+        settingsPath = Settings.FilePath,
+        feminizeDefault = true,
+        categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan) })
+    };
+
+    record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData);
+
+    // Persist per-PC settings from the UI: update the live server config + config/settings.json + the
+    // global game release. Only non-empty fields are applied (blank = keep current live value).
+    static void HandleSettings(HttpListenerContext ctx)
+    {
+        string body;
+        using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        SettingsReq? req;
+        try { req = JsonSerializer.Deserialize<SettingsReq>(body, J); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        if (req is null) { Send(ctx, 400, "application/json", Json(new { error = "bad body" })); return; }
+
+        bool gameChanged = false;
+        if (!string.IsNullOrWhiteSpace(req.Game)) { Game = req.Game!.Trim(); gameChanged = true; }
+        bool modsChanged = false;
+        if (!string.IsNullOrWhiteSpace(req.Mods)) { Mods = req.Mods!.Trim(); modsChanged = true; }
+        // profiles: explicit override wins; else if mods changed, re-derive the sibling profiles dir so
+        // loadorder.txt/plugins.txt are found on this PC (the bug where a stale profiles path returned 0).
+        if (!string.IsNullOrWhiteSpace(req.Profiles)) Profiles = req.Profiles!.Trim();
+        else if (modsChanged) Profiles = DeriveProfiles(Mods);
+        if (!string.IsNullOrWhiteSpace(req.Profile)) Profile = req.Profile!.Trim();
+        if (!string.IsNullOrWhiteSpace(req.BotPresets)) BotPresets = req.BotPresets!.Trim();
+        // base-game Data folder: explicit override wins; else if game changed, re-derive as its folder.
+        if (!string.IsNullOrWhiteSpace(req.GameData)) GameData = req.GameData!.Trim();
+        else if (gameChanged) GameData = Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game;
+        if (!string.IsNullOrWhiteSpace(req.GameVersion)) GameCfg.Release = GameCfg.Parse(req.GameVersion);
+
+        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
+
+        // the selected profile may not exist under a newly-derived profiles dir — fall back to the first.
+        var profileList = ListProfiles();
+        if (profileList.Count > 0 && !profileList.Contains(Profile, StringComparer.OrdinalIgnoreCase))
+            Profile = profileList[0];
+
+        // mirror the live values into the persisted settings and write settings.json
+        Settings.Current = new AppSettings
+        {
+            GameVersion = GameCfg.Canon(GameCfg.Release),
+            Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets
+        };
+        Settings.Save();
+        Send(ctx, 200, "application/json", Json(new
+        {
+            ok = true, saved = Settings.FilePath, gameVersion = GameCfg.Canon(GameCfg.Release),
+            profiles = Profiles, profile = Profile, profileList, gameData = GameData
+        }));
+    }
+
+    // Active plugins resolved to real paths, in load order (for scan categories). Empty if the profile
+    // has no loadorder.txt. Stock Data = the folder holding the game master (base/CC masters live there).
+    static List<string> ResolveActiveLoadOrder()
+    {
+        var profileDir = Path.Combine(Profiles, Profile);
+        return LoadOrderScan.ResolveActivePaths(profileDir, Mods, GameData);
+    }
+
+    // MO2 profiles (subfolders of the profiles dir that carry a modlist.txt).
+    static List<string> ListProfiles()
+    {
+        var r = new List<string>();
+        if (!Directory.Exists(Profiles)) return r;
+        foreach (var d in Directory.EnumerateDirectories(Profiles))
+            if (File.Exists(Path.Combine(d, "modlist.txt"))) r.Add(Path.GetFileName(d));
+        return r.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // modlist.txt: "+Name" enabled, "-Name" disabled, top line = highest priority. Name = mods subfolder.
+    static Dictionary<string, (bool enabled, int idx)>? ReadModlist(string? profile)
+    {
+        if (string.IsNullOrWhiteSpace(profile)) return null;
+        var f = Path.Combine(Profiles, profile, "modlist.txt");
+        if (!File.Exists(f)) return null;
+        var map = new Dictionary<string, (bool, int)>(StringComparer.OrdinalIgnoreCase);
+        int idx = 0;
+        foreach (var raw in File.ReadAllLines(f))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] == '#') continue;
+            char c = line[0];
+            if (c != '+' && c != '-') continue;                       // skip separators / other markers
+            var name = line[1..];
+            if (name.EndsWith("_separator", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!map.ContainsKey(name)) map[name] = (c == '+', idx++);
+        }
+        return map;
+    }
+
+    record ModEntry(string Name, string Folder, string[] Plugins, bool Enabled, int Order);
+
+    // Immediate subfolders of the mods dir that contain a plugin — the source candidates. When a profile
+    // is given, each entry carries its enabled state + load-order index (sorted by profile priority).
+    static List<ModEntry> ScanMods(string modsPath, string? profile)
+    {
+        var order = ReadModlist(profile);
+        var outList = new List<ModEntry>();
+        if (!Directory.Exists(modsPath)) return outList;
+        foreach (var dir in Directory.EnumerateDirectories(modsPath))
+        {
+            string[] plugins;
+            try
+            {
+                plugins = Directory.EnumerateFiles(dir, "*.es*", SearchOption.TopDirectoryOnly)
+                    .Where(f => f.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)
+                             || f.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)
+                             || f.EndsWith(".esl", StringComparison.OrdinalIgnoreCase))
+                    .Select(f => Path.GetFileName(f)).ToArray();
+            }
+            catch { continue; }
+            if (plugins.Length == 0) continue;
+            var name = Path.GetFileName(dir);
+            bool enabled = order is null || (order.TryGetValue(name, out var e) && e.enabled);
+            int ord = order is not null && order.TryGetValue(name, out var o) ? o.idx : int.MaxValue;
+            outList.Add(new ModEntry(name, dir, plugins, enabled, ord));
+        }
+        return outList.OrderBy(o => o.Order).ThenBy(o => o.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // SexPlague overlay config for the UI (tier labels + default percents) + whether the plugin is installed.
+    static object SexPlaguePayload()
+    {
+        var yaml = Path.Combine(Path.GetDirectoryName(Config) ?? ".", "sexplague.yaml");
+        var cfg = SexPlague.Load(File.Exists(yaml) ? yaml : null);
+        if (cfg is null) return new { available = false };
+        bool installed = Directory.Exists(Mods) && Directory.EnumerateDirectories(Mods)
+            .Any(d => { try { return File.Exists(Path.Combine(d, cfg.Plugin)); } catch { return false; } });
+        return new
+        {
+            available = true,
+            installed,
+            plugin = cfg.Plugin,
+            seedFaction = cfg.SeedFaction,
+            controllerSpell = cfg.ControllerSpell,
+            tiers = cfg.Tiers.Select(t => new { t.Faction, t.Label, t.Percent })
+        };
+    }
+
+    record GenSource(string Path, string? Mode);
+    record GenReq(string? Category, List<GenSource>? Sources, List<string>? Include, string? Name, string? Out,
+                  bool Feminize = true, bool Boost = false, bool Sexplague = false, List<int>? SexplaguePct = null,
+                  bool FeminineNames = false, bool BakeTextures = false);
+
+    static string FeminineNamesPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_names.yaml");
+
+    static void HandleGenerate(HttpListenerContext ctx)
+    {
+        string body;
+        using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        var req = JsonSerializer.Deserialize<GenReq>(body, J);
+        if (req?.Sources is null || req.Sources.Count == 0 || string.IsNullOrWhiteSpace(req.Name))
+        { Send(ctx, 400, "application/json", Json(new { error = "need sources[] and name" })); return; }
+
+        var outFolder = string.IsNullOrWhiteSpace(req.Out)
+            ? Path.Combine(OutDir, Path.GetFileNameWithoutExtension(req.Name!)) : req.Out!;
+
+        // curated ids -> temp file for --include. Selection is authoritative: a present-but-empty list
+        // means "no faces", not "all faces". Only a null Include (CLI without --include) pools everything.
+        string? includeFile = null;
+        if (req.Include is not null)
+        {
+            includeFile = Path.Combine(Path.GetTempPath(), $"facediv-include-{Guid.NewGuid():N}.txt");
+            File.WriteAllLines(includeFile, req.Include);
+        }
+
+        var a = new List<string> { "generate", "--game", Game, "--category", req.Category ?? "bandit",
+                                   "--config", Config, "--voice-map", VoiceMap,
+                                   "--out", outFolder, "--name", req.Name! };
+        // Scan categories (all_males) resolve targets from the whole active load order — hand the engine
+        // the resolved plugin paths (in order) via a temp file.
+        string? loFile = null;
+        if (Categories.IsScan(req.Category ?? ""))
+        {
+            var paths = ResolveActiveLoadOrder();
+            loFile = Path.Combine(Path.GetTempPath(), $"facediv-lo-{Guid.NewGuid():N}.txt");
+            File.WriteAllLines(loFile, paths);
+            a.Add("--loadorder"); a.Add(loFile);
+        }
+        if (!req.Feminize) a.Add("--no-feminize");
+        if (req.Boost) a.Add("--boost");
+        if (req.Sexplague)
+        {
+            a.Add("--sexplague");
+            if (req.SexplaguePct is { Count: > 0 }) { a.Add("--sexplague-pct"); a.Add(string.Join(",", req.SexplaguePct)); }
+        }
+        if (req.FeminineNames && File.Exists(FeminineNamesPath())) { a.Add("--feminine-names"); a.Add(FeminineNamesPath()); }
+        // Bake textures: hand the engine the enabled mod folders (MO2 priority) so it can resolve + bake
+        // cross-mod face textures (brows/eyes) into a self-contained output.
+        string? assetDirsFile = null;
+        if (req.BakeTextures)
+        {
+            var dirs = LoadOrderScan.EnabledMods(Path.Combine(Profiles, Profile), Mods).Select(m => m.folder);
+            assetDirsFile = Path.Combine(Path.GetTempPath(), $"facediv-assetdirs-{Guid.NewGuid():N}.txt");
+            File.WriteAllLines(assetDirsFile, dirs);
+            a.Add("--bake-textures"); a.Add("--asset-dirs"); a.Add(assetDirsFile);
+        }
+        if (includeFile is not null) { a.Add("--include"); a.Add(includeFile); }
+        foreach (var s in req.Sources)
+        {
+            var flag = s.Mode switch { "keep" => "--keep", "disable" => "--disable", "standalone" => "--standalone", _ => "--source" };
+            a.Add(flag); a.Add(s.Path);
+        }
+
+        var (code, log) = CaptureRun(a.ToArray());
+        if (includeFile is not null) { try { File.Delete(includeFile); } catch { } }
+        if (loFile is not null) { try { File.Delete(loFile); } catch { } }
+        if (assetDirsFile is not null) { try { File.Delete(assetDirsFile); } catch { } }
+        var readme = Path.Combine(outFolder, "README.txt");
+        Send(ctx, code == 0 ? 200 : 500, "application/json",
+            Json(new { ok = code == 0, log, outFolder, readme = File.Exists(readme) ? File.ReadAllText(readme) : null }));
+    }
+
+    // Run a command with stdout+stderr captured (single-threaded loop => no console race).
+    static (int code, string log) CaptureRun(string[] a)
+    {
+        var sw = new StringWriter();
+        var oldOut = Console.Out; var oldErr = Console.Error;
+        Console.SetOut(sw); Console.SetError(sw);
+        int code;
+        try { code = Generate.Run(a); }
+        catch (Exception e) { sw.WriteLine("EXCEPTION: " + e); code = 1; }
+        finally { Console.SetOut(oldOut); Console.SetError(oldErr); }
+        return (code, sw.ToString());
+    }
+
+    // ---- http helpers ----
+    static byte[] Json(object o) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(o, J));
+
+    static void Send(HttpListenerContext ctx, int status, string mime, byte[] body)
+    {
+        ctx.Response.StatusCode = status;
+        ctx.Response.ContentType = mime;
+        ctx.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+        ctx.Response.ContentLength64 = body.Length;
+        ctx.Response.OutputStream.Write(body, 0, body.Length);
+        ctx.Response.OutputStream.Close();
+    }
+    static void TrySend(HttpListenerContext ctx, int s, string m, byte[] b) { try { Send(ctx, s, m, b); } catch { } }
+
+    static string Mime(string f) => Path.GetExtension(f).ToLowerInvariant() switch
+    {
+        ".html" => "text/html; charset=utf-8", ".js" => "text/javascript; charset=utf-8",
+        ".css" => "text/css; charset=utf-8", ".json" => "application/json",
+        ".svg" => "image/svg+xml", ".png" => "image/png", _ => "application/octet-stream"
+    };
+
+    // App home = nearest ancestor of the exe that has both config/ and (eventually) web/.
+    static string AppHome()
+    {
+        var d = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var p = d; p != null; p = p.Parent)
+            if (Directory.Exists(Path.Combine(p.FullName, "config")) &&
+                File.Exists(Path.Combine(p.FullName, "config", "categories.yaml")))
+                return p.FullName;
+        return "C:/Modlists/SME/FaceDiversityApp";
+    }
+}

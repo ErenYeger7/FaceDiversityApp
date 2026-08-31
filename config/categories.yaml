@@ -1,0 +1,73 @@
+# categories.yaml — maps each "unnamed NPC" category to its target records + injection lists.
+# v1 implements OVERRIDE of own-traits (fixed-face) records. leveled_lists_* are for v1.1 injection.
+# target_editorid_prefix is the ground truth for the override target set; verify per category from
+# Skyrim.esm before enabling (only `bandit` is verified so far).
+categories:
+  bandit:
+    label: Bandits
+    verified: true
+    target_editorid_prefix: EncBandit
+    own_traits_only: true
+    leveled_lists_prefix: LCharBandit      # v1.1 injection targets (80 lists in vanilla)
+    known_replacers: [ rsbotLiteralWhoBandits.esp ]
+
+  # --- verified 2026-08-14 against Skyrim.esm (own-traits target counts in comments) ---
+  forsworn:
+    label: Forsworn
+    verified: true
+    target_editorid_prefix: EncForsworn          # 150 own-traits (94 M / 56 F), all BretonRace
+    own_traits_only: true
+    known_replacers: [ rsbotForswornWomen.esp, NorthernWomenForsworn.esp ]
+
+  necromancer:
+    label: Necromancers
+    verified: true
+    target_editorid_prefix: EncWarlockNecro      # 72 own-traits (36 M / 36 F): Breton/HighElf/Imperial/DarkElf
+    own_traits_only: true                         # (narrower than EncWarlock=426, which is ALL mages)
+    known_replacers: [ rsbotLiteralWhoNecromancers.esp ]
+
+  vampire:
+    label: Vampires
+    verified: true
+    target_editorid_prefix: EncVampire           # 61 own-traits (25 M / 36 F); uses *RaceVampire races
+    own_traits_only: true                         # -> needs vampire-race faces (the vampire replacer)
+    known_replacers: [ rsbotLiteralWhoVampires.esp ]
+
+  thalmor:
+    label: Thalmor
+    verified: true
+    target_editorid_prefix: EncThalmor           # 28 own-traits (3 M / 25 F), all HighElfRace
+    own_traits_only: true
+    known_replacers: [ rsbotLiteralWhoThalmor.esp ]
+
+  vigilant:
+    label: Vigilants
+    verified: true
+    target_editorid_prefix: EncVigilantOfStendarr # 8 own-traits (5 M / 3 F): Nord/Redguard/DarkElf (small)
+    own_traits_only: true
+    known_replacers: [ rsbotLiteralWhoVigilants.esp ]
+
+  world_encounter:
+    label: World Encounters
+    verified: true
+    target_editorid_prefix: WEAdventurer         # 32 own-traits (21 M / 11 F), 10 races. Scoped to
+    own_traits_only: true                         # WEAdventurer ONLY: bare "WE" also matches children,
+    known_replacers: [ rsbotLiteralWhoFemaleWorldEncounters.esp ]  # dogs, werewolves — never feminize those.
+
+  guard:
+    label: Guards
+    verified: true
+    target_editorid_prefix: EncGuard             # 18 own-traits (15 M / 3 F). LIMITED: the city hold
+    own_traits_only: true                         # guards you see everywhere are unique per-hold records
+    known_replacers: [ rsbotLiteralWhoGuards.esp ] # (not own-traits) and are NOT covered by this.
+
+  # --- load-order scan (not a prefix): every UNIQUE, own-traits, named MALE across the active load
+  #     order (winning overrides), any defining plugin. Substitutes named characters, not filler.
+  #     Verified 2026-08-14 on the SME list: 789 unique named males (vs 1649 for any-name). Boost N/A
+  #     (no vanilla leveled-list slots — these are placed uniques); creature/beast races skip for lack
+  #     of a matching harvested face. Feminization is the intended mode (the pool is female-heavy). ---
+  all_males:
+    label: All loaded males (named)
+    verified: true
+    scan: loadorder-males
+    known_replacers: []

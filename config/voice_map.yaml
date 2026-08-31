@@ -1,0 +1,72 @@
+# voice_map.yaml — Male -> Female voice remap used when feminizing NPC records.
+#
+# Two tiers (modelled on SkyLady's Voice Compatibility scheme, generaleagleyt/SkyLady):
+#   voice_map            direct male-voice -> female-voice mapping (takes priority).
+#   race_voice_fallbacks race -> female-voice pool, used when a target's male voice has no direct
+#                        mapping (e.g. MaleUniqueUlfric and other unique/custom voices). Without this,
+#                        a feminized male with an unmapped voice would keep his MALE voice.
+#
+# A right-hand side may list several female voices (comma-separated / YAML list); the generator picks
+# one DETERMINISTICALLY per NPC (hash of FormID), so voices stay stable across regenerations — unlike
+# SkyLady's random pick. Every chosen voice is validated against the load order's VoiceTypes before
+# writing; if none of the candidates exist (or there's no pool for the race), the male voice is kept
+# and counted as unmapped.
+voice_map:
+  MaleArgonian:            FemaleArgonian
+  MaleBandit:              FemaleCommoner
+  MaleBrute:               FemaleCommander
+  MaleCommander:           FemaleCommander
+  MaleCommoner:            FemaleCommoner
+  MaleCommonerAccented:    FemaleCommoner
+  MaleCondescending:       FemaleCondescending
+  MaleCoward:              FemaleCoward
+  MaleDarkElf:             FemaleDarkElf
+  MaleDrunk:               FemaleSultry
+  MaleElfHaughty:          FemaleElfHaughty
+  MaleEvenToned:           FemaleEvenToned
+  MaleEvenTonedAccented:   FemaleEvenToned
+  MaleGuard:               FemaleCommander
+  MaleKhajiit:             FemaleKhajiit
+  MaleNord:                FemaleNord
+  MaleNordCommander:       FemaleNord
+  MaleOldGrumpy:           FemaleOldGrumpy
+  MaleOldKindly:           FemaleOldKindly
+  MaleOrc:                 FemaleOrc
+  MaleSlyCynical:          FemaleSultry
+  MaleSoldier:             FemaleCommander    # NOTE: no vanilla "FemaleSoldier" voice — use FemaleCommander
+  MaleUniqueGhost:         FemaleUniqueGhost
+  MaleWarlock:             FemaleCondescending
+  MaleYoungEager:          FemaleYoungEager
+  DLC1MaleVampire:         DLC1FemaleVampire
+  DLC2MaleDarkElfCommoner: DLC2FemaleDarkElfCommoner
+  DLC2MaleDarkElfCynical:  FemaleDarkElf
+
+# Race fallback pools for unmapped (unique/custom) male voices. Keyed by race EditorID.
+race_voice_fallbacks:
+  NordRace:            [FemaleNord, FemaleEvenToned, FemaleCommander, FemaleYoungEager, FemaleSultry]
+  NordRaceVampire:     [FemaleNord, FemaleEvenToned, FemaleCommander, FemaleYoungEager, FemaleSultry]
+  DarkElfRace:         [FemaleDarkElf, DLC2FemaleDarkElfCommoner, FemaleCondescending]
+  DarkElfRaceVampire:  [FemaleDarkElf, DLC2FemaleDarkElfCommoner]
+  ArgonianRace:        [FemaleArgonian]
+  ArgonianRaceVampire: [FemaleArgonian]
+  KhajiitRace:         [FemaleKhajiit]
+  KhajiitRaceVampire:  [FemaleKhajiit]
+  HighElfRace:         [FemaleElfHaughty, FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  HighElfRaceVampire:  [FemaleElfHaughty, FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  WoodElfRace:         [FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  WoodElfRaceVampire:  [FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  BretonRace:          [FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  BretonRaceVampire:   [FemaleEvenToned, FemaleYoungEager, FemaleSultry]
+  ImperialRace:        [FemaleEvenToned, FemaleCommander, FemaleYoungEager, FemaleSultry]
+  ImperialRaceVampire: [FemaleEvenToned, FemaleCommander, FemaleYoungEager, FemaleSultry]
+  RedguardRace:        [FemaleEvenToned, FemaleSultry, FemaleYoungEager]
+  RedguardRaceVampire: [FemaleEvenToned, FemaleSultry, FemaleYoungEager]
+  OrcRace:             [FemaleOrc]
+  OrcRaceVampire:      [FemaleOrc]
+
+feminization:
+  enabled: true
+  set_female_flag: true
+  remap_voice: true
+  no_matching_race_face: skip   # cart has no female face of target's race -> leave record unchanged, log it
+  unmapped_voice: keep          # no direct map AND no race fallback -> keep male voice, count as unmapped

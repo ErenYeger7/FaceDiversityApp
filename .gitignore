@@ -1,0 +1,22 @@
+# ── Build output ──────────────────────────────────────────────
+engine/bin/
+engine/obj/
+*.user
+
+# ── Generated mod outputs ─────────────────────────────────────
+# These contain / reference THIRD-PARTY mod assets (harvested faces,
+# textures, ESPs). Personal use only — never commit or redistribute.
+out/
+
+# ── Machine-specific configuration ────────────────────────────
+# Absolute paths differ per PC (SE box vs VR box). Each machine keeps
+# its own copy: cp config/settings.example.json config/settings.json
+# (or just fill in the ⚙ Setup card in the web UI).
+config/settings.json
+
+# ── Editor / OS cruft ─────────────────────────────────────────
+.vs/
+.idea/
+*.suo
+Thumbs.db
+desktop.ini

@@ -1,0 +1,13 @@
+# sexplague.yaml — optional overlay: tag each FEMINIZED male (a male target we turned female) with
+# the SexPlague controller ability + factions, applied at runtime via a generated SkyPatcher NPC config
+# (no master dependency on SexPlagueFactions.esp). Each feminized male gets exactly ONE tier faction
+# (weighted by percent, summing to 100), PLUS the seed faction and the controller ability (both to all).
+# FormIDs are the record IDs inside the plugin (hex, with 0x), as SkyPatcher expects.
+sexplague:
+  plugin: SexPlagueFactions.esp
+  seed_faction: 0x803          # SexPlague_seed — added to ALL feminized males
+  controller_spell: 0x80A      # SexPlague_ControllerAbility — added to ALL feminized males
+  tiers:                       # each feminized male gets exactly one, distributed by percent
+    - { faction: 0x800, label: begin, percent: 60 }
+    - { faction: 0x801, label: mid,   percent: 30 }
+    - { faction: 0x802, label: adv,   percent: 10 }

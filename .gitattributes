@@ -1,0 +1,3 @@
+# Normalize line endings across the SE and VR machines.
+* text=auto
+*.cmd text eol=crlf
