@@ -20,14 +20,16 @@ using System.Text.RegularExpressions;
 // Distributes female faces across the category's own-traits targets, matched by race; feminizes males.
 static class Generate
 {
-    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female);
+    // Overlay = this pooling is a compat-group "also serve" (double-dip): the target keeps ITS race and
+    // just wears this head-compatible face, so assignment must NOT SetTo the face's race.
+    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female, bool Overlay = false);
     record VoiceRemap(Dictionary<string, List<string>> Direct, Dictionary<string, List<string>> Fallback);
     static string PoolKey(string race, bool female) => race + (female ? "|F" : "|M");
 
     public static int Run(string[] args)
     {
         string? game = null, category = "bandit", voiceMapPath = null, outFolder = null, outName = null;
-        string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null;
+        string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
         bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false;
         for (int i = 1; i < args.Length; i++)
@@ -52,16 +54,27 @@ static class Generate
                 case "--feminine-names": feminineNames = true; feminineNamesPath = args[++i]; break; // apply feminine fullName via SkyPatcher
                 case "--bake-textures": bakeTextures = true; break;   // bake cross-mod face textures (brows/eyes/etc.) for self-contained output
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
+                case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
             }
         if (game is null || outFolder is null || outName is null || srcSpecs.Count == 0)
         { Console.Error.WriteLine("need --game --out --name and at least one --source/--keep/--disable"); return 1; }
 
         Categories.Load(configPath);
+        // Head-compatibility groups for the merger, next to categories.yaml (base<->vampire by default).
+        RaceCompat.Load(configPath is not null ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configPath))!, "race_compat.yaml") : null);
         // Curation: if an include file is given, only faces whose id (Faces.FaceId) is listed are pooled.
         var include = includePath is not null && File.Exists(includePath)
             ? new HashSet<string>(File.ReadAllLines(includePath).Select(l => l.Trim()).Where(l => l.Length > 0),
                                   StringComparer.OrdinalIgnoreCase)
             : null;
+
+        // Race merger (library `as:`): faceId -> an ADDITIONAL race the face also serves (double-dip). The
+        // face still serves its own race; this adds a compat-group OVERLAY bucket (see pooling below), so a
+        // pretty Imperial face can also cover ImperialRaceVampire slots WITHOUT de-vampiring them.
+        var raceOverride = raceOverridePath is not null && File.Exists(raceOverridePath)
+            ? File.ReadAllLines(raceOverridePath).Select(l => l.Split('\t')).Where(p => p.Length == 2 && p[0].Length > 0 && p[1].Length > 0)
+                  .GroupBy(p => p[0].Trim(), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First()[1].Trim(), StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
         var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
@@ -156,9 +169,18 @@ static class Generate
                 // off, male targets draw male faces.
                 var r = Classify.BaseMasters.Contains(n.FormKey.ModKey.FileName) && esmNpcRace.TryGetValue(n.FormKey, out var vr)
                     ? RaceOf(vr) : RaceOf(n.Race.FormKey);
-                var key = PoolKey(r, Fem(n));
-                if (!pool.TryGetValue(key, out var l)) { l = new(); pool[key] = l; }
-                l.Add(new Face(n, folder, disable, Fem(n)));
+                void Pool(string race, bool overlay) {
+                    var key = PoolKey(race, Fem(n));
+                    if (!pool.TryGetValue(key, out var l)) { l = new(); pool[key] = l; }
+                    l.Add(new Face(n, folder, disable, Fem(n), overlay));
+                }
+                Pool(r, false);   // native bucket (own race) — assignment adopts the face's race as before
+                // Merger double-dip: ALSO pool as the saved `as:` race, but ONLY if it's head-compatible
+                // (same race_compat group). That draw is an OVERLAY — the target keeps ITS race (a vampire
+                // stays a vampire) and wears this face; enforced compatible so the head/skin still match.
+                if (raceOverride.TryGetValue(Faces.FaceId(sp, n.FormKey), out var ov) && ov.Length > 0
+                    && !ov.Equals(r, StringComparison.OrdinalIgnoreCase) && RaceCompat.AreCompatible(r, ov))
+                    Pool(ov, true);
             }
         }
         // (RemapLinks deferred: we copy only the WORN source HDPTs after assignment, then remap.)
@@ -203,10 +225,13 @@ static class Generate
         }
 
         // Transplant a source face's fields onto an output NPC (shared by the override + boost paths).
-        void ApplyFaceFields(Npc npc, Face face)
+        void ApplyFaceFields(Npc npc, Face face, bool keepRace = false)
         {
             var s = face.Npc;
-            npc.Race.SetTo(s.Race.FormKey);           // adopt source race (custom breeds for khajiit; no-op otherwise)
+            // Native draw: adopt the face's race (custom breeds for khajiit; no-op same-race). Overlay draw
+            // (compat double-dip): KEEP the target's race so a vampire stays a vampire — the head is
+            // group-compatible, and the target's race supplies its own skin/normal/eyes.
+            if (!keepRace) npc.Race.SetTo(s.Race.FormKey);
             npc.HeadParts.Clear();
             // Link to the ORIGINAL source FormKey; for a disable face the deferred deep-copy below copies
             // the reached records and RemapLinks redirects these to our copies. Keep faces stay as-is.
@@ -257,7 +282,7 @@ static class Generate
 
             var npc = outMod.Npcs.GetOrAddAsOverride(t);
             var s = face.Npc;
-            ApplyFaceFields(npc, face);
+            ApplyFaceFields(npc, face, keepRace: face.Overlay);
 
             if (feminize && !Fem(t))
             {

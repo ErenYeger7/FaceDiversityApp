@@ -1,0 +1,22 @@
+# Head/skin-compatible race groups for the Library face merger ("Also serve" / double-dip).
+#
+# A face may ALSO be generated for another race ONLY if that race is in the SAME group below.
+# The extra assignment is an OVERLAY: the target keeps ITS race (a vampire stays a vampire) and
+# wears the head-compatible face. So a group must only contain races that share the head mesh +
+# skin family. Vanilla base<->vampire pairs qualify — verified in Skyrim.esm: each pair shares the
+# same MaleHead* mesh and the same skin ARMO; only the eyes and skin normal differ.
+#
+# EDIT AT YOUR OWN RISK. Putting head-INcompatible races in one group (a human with an elf or a
+# beast, or a light-skinned race with a dark-skinned one) will look wrong in game — mismatched head
+# geometry or skin tone. When unsure, leave the base<->vampire defaults as they are.
+groups:
+  - [NordRace, NordRaceVampire]
+  - [ImperialRace, ImperialRaceVampire]
+  - [BretonRace, BretonRaceVampire]
+  - [RedguardRace, RedguardRaceVampire]
+  - [DarkElfRace, DarkElfRaceVampire]
+  - [HighElfRace, HighElfRaceVampire]
+  - [WoodElfRace, WoodElfRaceVampire]
+  - [OrcRace, OrcRaceVampire]
+  - [ArgonianRace, ArgonianRaceVampire]
+  - [KhajiitRace, KhajiitRaceVampire]

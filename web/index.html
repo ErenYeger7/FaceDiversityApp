@@ -45,6 +45,8 @@
   .modpick .m{display:flex;gap:8px;align-items:center;padding:5px 8px;border-bottom:1px solid var(--line);font-size:12px}
   .modpick .m:last-child{border-bottom:none}
   .modpick .m .mn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .modpick .m .lsum{font-size:11px;color:#a9c9ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+  .src .lsum{font-size:11px;color:#a9c9ff;margin:-2px 0 6px 6px;white-space:normal}
   .modpick .m.added{opacity:.5}
   table{width:100%;border-collapse:collapse;font-size:12.5px}
   thead th{position:sticky;top:0;background:var(--panel);text-align:left;color:var(--dim);
@@ -87,6 +89,8 @@
   .blbtn{cursor:pointer;font-size:14px;line-height:1;background:none;border:none;padding:2px 3px;filter:grayscale(1);opacity:.45}
   .blbtn:hover{opacity:.8}
   .blbtn.on{filter:none;opacity:1}
+  select.asSel{width:auto;min-width:78px;padding:2px 4px;font-size:11px;background:var(--panel2)}
+  select.asSel.asSet{border-color:var(--accent);color:var(--accent)}
   /* face lightbox */
   #lightbox{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.85);display:flex;
     align-items:center;justify-content:center;padding:28px;cursor:zoom-out}
@@ -196,7 +200,9 @@ window.addEventListener('unhandledrejection',function(ev){
           <thead><tr>
             <th style="width:26px"></th><th class="libcol thumbcol"></th><th data-k="editorID">Face (EditorID)</th>
             <th data-k="sex" style="width:34px">Sex</th>
-            <th data-k="poolRace">Race</th><th data-k="source">Source</th>
+            <th data-k="poolRace">Race</th>
+            <th class="libcol" title="ALSO generate this face for a head-compatible race (its vampire variant). Double-dip: the face keeps serving its own race too, and the vampire target stays a vampire — it just wears this face.">Also</th>
+            <th data-k="source">Source</th>
             <th class="libcol" style="width:30px" title="blacklist across all mods">⛔</th>
           </tr></thead>
           <tbody id="faceBody"><tr><td colspan="7" class="muted" style="padding:10px">Add a source mod above to list its faces.</td></tr></tbody>
@@ -348,7 +354,7 @@ async function api(p,o){
   catch(e){ throw new Error('non-JSON from '+p+': '+txt.slice(0,300)); }
 }
 const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1,
-  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{} };
+  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{}, raceAs:{}, compat:{} };
 
 // ---------- boot ----------
 (async function boot(){
@@ -396,6 +402,7 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
 
   await setupSexPlague();
   await setupFemNames();
+  try { state.compat = await api('/api/race-compat'); } catch { state.compat = {}; }
   await onCategory();
   await scanMods();
  } catch(e){ window.__err('BOOT FAILED: '+(e&&e.stack?e.stack:e)); }
@@ -452,6 +459,7 @@ async function saveSettings(){
     }
     if($('#profilesPath')) $('#profilesPath').textContent = r.profiles ? ('profiles (auto): '+winPath(r.profiles)) : '';
     if(r.gameData) $('#gameDataInput').value = winPath(r.gameData);
+    try { state.compat = await api('/api/race-compat'); } catch {}  // compat groups depend on the config
     await onCategory();   // re-read demand/boostinfo against the new game + version
     await scanMods();     // re-scan mods with the new mods/profile
   }catch(e){ note.textContent='✘ '+(e&&e.message?e.message:e); }
@@ -510,6 +518,23 @@ async function onCategory(){
   refreshName();  // group changed -> update the auto filename
 }
 
+// ---------- library coverage summary (saved per-mod race counts, surfaced in Mod Creator) ----------
+function shortRace(r){ return (''+r).replace(/Race/g,'').replace(/Vampire/g,'V'); }
+// {RaceName:{f,m}} -> {text:"Nord 12 · Orc 1", title:"NordRace: 12F\n..."} or null.
+function summaryText(sum){
+  if(!sum) return null;
+  const ents = Object.entries(sum).map(([r,c])=>({r, f:(c.f||0), m:(c.m||0), t:(c.f||0)+(c.m||0)}))
+    .filter(e=>e.t>0).sort((a,b)=> b.t-a.t || a.r.localeCompare(b.r));
+  if(!ents.length) return null;
+  return { text: ents.map(e=>`${shortRace(e.r)} ${e.t}`).join(' · '),
+           title: ents.map(e=>`${e.r}: ${e.f}F${e.m?(' '+e.m+'M'):''}`).join('\n') };
+}
+// find the saved summary for a plugin filename across the scanned mods.
+function summaryForPlugin(plugin){
+  for(const m of state.mods){ if(m.summaries && m.summaries[plugin]) return m.summaries[plugin]; }
+  return null;
+}
+
 // ---------- source mods ----------
 async function scanMods(){
   $('#modPick').innerHTML = '<div class="muted" style="padding:8px">Scanning…</div>';
@@ -534,8 +559,12 @@ function renderModPick(){
       const path = m.folder + '\\' + p;
       const added = state.sources.some(s=>s.path===path);
       const off = (!m.enabled) ? ' <span class="muted">· off</span>' : '';
+      const sum = summaryText(m.summaries && m.summaries[p]);
       rows.push(`<div class="m ${added?'added':''}">
-        <span class="mn" title="${esc(m.name)}">${esc(p)} <span class="muted">— ${esc(m.name)}</span>${off}</span>
+        <div style="flex:1;min-width:0">
+          <div class="mn" title="${esc(m.name)}">${esc(p)} <span class="muted">— ${esc(m.name)}</span>${off}</div>
+          ${sum ? `<div class="lsum" title="library coverage (faces per race)&#10;${esc(sum.title)}">📚 ${esc(sum.text)}</div>` : ''}
+        </div>
         <button class="mini" ${added?'disabled':''} onclick="addSource('${jsq(path)}','${jsq(p)}')">Add</button></div>`);
     }
   }
@@ -581,7 +610,7 @@ function renderSources(){
         ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
       </select>
       <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
-    </div>${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
+    </div>${(()=>{const su=summaryText(summaryForPlugin(s.plugin)); return su?`<div class="lsum" title="${esc(su.title)}">📚 library coverage — ${esc(su.text)}</div>`:'';})()}${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
 }
 // A keep source is safe to switch to disable ONLY if the keep reason is the soft one (its BSA). Custom
 // races and shipped skin textures are hard keeps — disabling would break the face or cause a neck seam.
@@ -631,6 +660,7 @@ async function ensureWhitelists(){
     if(state.wl[s.plugin]!==undefined) continue;
     try{ const r = await api('/api/library/mod?plugin='+encodeURIComponent(s.plugin));
       state.wl[s.plugin] = r.hasWhitelist ? new Set(r.keys) : null;
+      if(r.overrides) for(const [k,race] of Object.entries(r.overrides)) state.raceAs[s.plugin+'#'+k]=race; // preload merger picks
     }catch{ state.wl[s.plugin] = null; }
   }
 }
@@ -672,6 +702,11 @@ function renderFaces(){
     const cls = [dim, bl?'blacklisted':''].filter(Boolean).join(' ');
     const ttl = lib ? '' : (faceUsable(f)?'':'not used by this category (wrong race/gender)');
     const thumb = lib ? `<td class="libcol thumbcol">${thumbHtml(f)}</td>` : '';
+    const asVal = state.raceAs[f.id]||'';
+    const compatOthers = (state.compat && state.compat[f.poolRace]) || [];
+    const ascell = lib ? `<td class="libcol">${compatOthers.length
+        ? `<select class="asSel${asVal?' asSet':''}" title="also generate this face for its vampire variant — it keeps that race, just wears this face" onchange="setRaceAs('${jsq(f.id)}',this.value)">${raceOptions(asVal, compatOthers)}</select>`
+        : '<span class="muted" title="no head-compatible race for this one">—</span>'}</td>` : '';
     const blcell = lib ? `<td class="libcol" style="text-align:center"><button class="blbtn ${bl?'on':''}" title="${bl?'blacklisted everywhere — click to remove':'blacklist this NPC across ALL mods'}" onclick="togBlack('${jsq(f.formKey)}','${jsq(f.editorID||'')}','${jsq(f.poolRace||'')}')">⛔</button></td>` : '';
     return `<tr class="${cls}" title="${esc(ttl)}">
       <td><input type="checkbox" ${state.selected.has(f.id)?'checked':''} onchange="tog('${jsq(f.id)}',this.checked)"></td>
@@ -679,11 +714,12 @@ function renderFaces(){
       <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
       <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
       <td>${esc(f.poolRace)}</td>
+      ${ascell}
       <td class="muted" title="${esc(f.source)}">${esc(f.source.replace(/\.esp$/i,''))}</td>
       ${blcell}
     </tr>`;
   }).join('') :
-    '<tr><td colspan="7" class="muted" style="padding:10px">no faces match the filter.</td></tr>';
+    '<tr><td colspan="8" class="muted" style="padding:10px">no faces match the filter.</td></tr>';
   updateSelCount();
 }
 
@@ -694,6 +730,20 @@ function thumbHtml(f){
   return `<img class="thumb" loading="lazy" alt="" src="/api/mugshot?formKey=${encodeURIComponent(f.formKey)}" onerror="thumbFail(this)" onclick="showFace('${jsq(f.formKey)}','${jsq(cap)}')">`;
 }
 window.thumbFail = function(img){ img.onerror=null; const d=document.createElement('div'); d.className='thumb ph'; d.textContent='no img'; img.replaceWith(d); };
+
+// "also serve" dropdown: double-dip this face onto a head-compatible race (its vampire variant). The face
+// still serves its own race; the target of the chosen race keeps ITS race and just wears this face.
+function raceOptions(sel, others){
+  const opts = ['<option value="">(none)</option>'];
+  for(const r of (others||[])) opts.push(`<option value="${esc(r)}" ${r===sel?'selected':''}>${esc(r)}</option>`);
+  return opts.join('');
+}
+window.setRaceAs = function(id, race){
+  const f = state.faces.find(x=>x.id===id);
+  if(!race || (f && race===f.poolRace)) delete state.raceAs[id];
+  else { state.raceAs[id]=race; if(f) state.selected.add(id); } // "also serve" implies you want the face in
+  renderFaces(); renderLibSummary();
+};
 
 // Lightbox: full-size mugshot on thumbnail click (reuses the cached /api/mugshot image).
 window.showFace = function(formKey, caption){
@@ -980,7 +1030,7 @@ async function saveLibrary(){
   const results=[];
   for(const s of state.sources){
     const faces = state.faces.filter(f=>f.source===s.plugin && state.selected.has(f.id))
-      .map(f=>({key:f.formKey, editorID:f.editorID, race:f.poolRace}));
+      .map(f=>({key:f.formKey, as:(state.raceAs[f.id]||null), editorID:f.editorID, race:f.poolRace, sex:f.sex}));
     try{ const r = await api('/api/library/mod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin:s.plugin, faces})});
       state.wl[s.plugin] = new Set(faces.map(f=>f.key));
       results.push(`✔ ${s.plugin}: ${r.count} face${r.count===1?'':'s'} whitelisted`);

@@ -132,6 +132,27 @@ static class Faces
         finally { LoadOrderScan.DisposeLoadOrder(lo); }
     }
 
+    // Humanoid races from the game esm (those carrying the ActorTypeNPC keyword) — the candidate targets
+    // for the phase-2 race merger. Key = the JOIN KEY (RaceOf = esm EditorID), identical to how faces and
+    // demand are keyed, so a saved `as: <key>` pools the face into that race's target bucket. Child races
+    // and creatures are excluded (same gate the load-order scan uses).
+    public static List<(string key, string name)> HumanoidRaces(string game)
+    {
+        using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
+        FormKey kw = default; bool haveKw = false;
+        foreach (var k in esm.Keywords)
+            if (k.EditorID == "ActorTypeNPC") { kw = k.FormKey; haveKw = true; break; }
+        var list = new List<(string, string)>();
+        foreach (var r in esm.Races)
+        {
+            var eid = r.EditorID ?? "";
+            if (eid.Length == 0 || eid.Contains("Child", StringComparison.OrdinalIgnoreCase)) continue;
+            bool humanoid = !haveKw || (r.Keywords is not null && r.Keywords.Any(k => k.FormKey == kw));
+            if (humanoid) list.Add((eid, eid));
+        }
+        return list.OrderBy(x => x.Item2, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     // How many vanilla LeveledNpc lists directly reference this category's NPCs — i.e. whether the
     // Leveled-List Boost has anywhere to inject. 0 => the category can't be boosted.
     public static int BoostListCount(string game, string category)

@@ -79,6 +79,7 @@ static class Serve
                 case "--port": port = int.Parse(args[++i]); break;
             }
         Categories.Load(File.Exists(Config) ? Config : null);
+        RaceCompat.Load(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(Config)) ?? ".", "race_compat.yaml"));
 
         // Bind both loopback hosts so either http://127.0.0.1:<port>/ or http://localhost:<port>/ works.
         // "localhost" may need a URL ACL on some Windows setups; if the dual bind fails, fall back to the IP.
@@ -147,8 +148,17 @@ static class Serve
                     var plugin = q["plugin"];
                     if (string.IsNullOrWhiteSpace(plugin)) { Send(ctx, 400, "application/json", Json(new { error = "plugin required" })); return; }
                     var wl = Library.LoadWhitelist(plugin!);
-                    Send(ctx, 200, "application/json", Json(new { plugin, hasWhitelist = wl != null, keys = wl?.ToArray() ?? Array.Empty<string>() })); return;
+                    Send(ctx, 200, "application/json", Json(new { plugin, hasWhitelist = wl != null,
+                        keys = wl?.ToArray() ?? Array.Empty<string>(), overrides = Library.LoadWhitelistOverrides(plugin!),
+                        summary = Library.LoadWhitelistSummary(plugin!) })); return;
                 }
+                case "/api/races":
+                {
+                    try { Send(ctx, 200, "application/json", Json(Faces.HumanoidRaces(Game).Select(r => new { key = r.key, name = r.name }))); }
+                    catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
+                case "/api/race-compat": Send(ctx, 200, "application/json", Json(RaceCompat.Map())); return;
                 case "/api/library/blacklist":
                 {
                     if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
@@ -322,7 +332,8 @@ static class Serve
         return map;
     }
 
-    record ModEntry(string Name, string Folder, string[] Plugins, bool Enabled, int Order);
+    record ModEntry(string Name, string Folder, string[] Plugins, bool Enabled, int Order,
+                    Dictionary<string, Dictionary<string, Library.RaceCount>>? Summaries);
 
     // Immediate subfolders of the mods dir that contain a plugin — the source candidates. When a profile
     // is given, each entry carries its enabled state + load-order index (sorted by profile priority).
@@ -347,7 +358,11 @@ static class Serve
             var name = Path.GetFileName(dir);
             bool enabled = order is null || (order.TryGetValue(name, out var e) && e.enabled);
             int ord = order is not null && order.TryGetValue(name, out var o) ? o.idx : int.MaxValue;
-            outList.Add(new ModEntry(name, dir, plugins, enabled, ord));
+            // attach the saved per-race face summary for any plugin here that's been curated (has a whitelist)
+            var summaries = new Dictionary<string, Dictionary<string, Library.RaceCount>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in plugins)
+                if (Library.HasWhitelist(p) && Library.LoadWhitelistSummary(p) is { Count: > 0 } s) summaries[p] = s;
+            outList.Add(new ModEntry(name, dir, plugins, enabled, ord, summaries.Count > 0 ? summaries : null));
         }
         return outList.OrderBy(o => o.Order).ThenBy(o => o.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -430,6 +445,24 @@ static class Serve
             a.Add("--bake-textures"); a.Add("--asset-dirs"); a.Add(assetDirsFile);
         }
         if (includeFile is not null) { a.Add("--include"); a.Add(includeFile); }
+        // Race merger: collect each source's saved `as:` overrides into a TSV (faceId<TAB>race). Only
+        // curated sources (with a whitelist file) contribute; the engine remaps only the faces it pools.
+        string? raceOvFile = null;
+        {
+            var lines = new List<string>();
+            foreach (var s in req.Sources)
+            {
+                var plugin = Path.GetFileName(s.Path);
+                foreach (var kv in Library.LoadWhitelistOverrides(plugin))
+                    lines.Add($"{plugin}#{kv.Key}\t{kv.Value}");
+            }
+            if (lines.Count > 0)
+            {
+                raceOvFile = Path.Combine(Path.GetTempPath(), $"facediv-raceov-{Guid.NewGuid():N}.txt");
+                File.WriteAllLines(raceOvFile, lines);
+                a.Add("--race-override"); a.Add(raceOvFile);
+            }
+        }
         foreach (var s in req.Sources)
         {
             var flag = s.Mode switch { "keep" => "--keep", "disable" => "--disable", "standalone" => "--standalone", _ => "--source" };
@@ -440,6 +473,7 @@ static class Serve
         if (includeFile is not null) { try { File.Delete(includeFile); } catch { } }
         if (loFile is not null) { try { File.Delete(loFile); } catch { } }
         if (assetDirsFile is not null) { try { File.Delete(assetDirsFile); } catch { } }
+        if (raceOvFile is not null) { try { File.Delete(raceOvFile); } catch { } }
         var readme = Path.Combine(outFolder, "README.txt");
         Send(ctx, code == 0 ? 200 : 500, "application/json",
             Json(new { ok = code == 0, log, outFolder, readme = File.Exists(readme) ? File.ReadAllText(readme) : null }));
@@ -480,11 +514,11 @@ static class Serve
         }).ToList();
     }
 
-    record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race);
+    record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race, string? Sex);
     record SaveWhitelistReq(string? Plugin, List<FaceEntryReq>? Faces, bool Remove = false);
     record SaveBlacklistReq(List<FaceEntryReq>? Npcs);
 
-    static Library.FaceEntry ToEntry(FaceEntryReq r) => new() { Key = r.Key ?? "", As = r.As, EditorID = r.EditorID, Race = r.Race };
+    static Library.FaceEntry ToEntry(FaceEntryReq r) => new() { Key = r.Key ?? "", As = r.As, EditorID = r.EditorID, Race = r.Race, Sex = r.Sex };
 
     static void HandleSaveWhitelist(HttpListenerContext ctx)
     {

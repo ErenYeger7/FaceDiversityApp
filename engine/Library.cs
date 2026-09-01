@@ -32,10 +32,19 @@ static class Library
         public string Key { get; set; } = "";
         public string? As { get; set; }
         [YamlIgnore] public string? EditorID { get; set; }   // written as a trailing comment only
-        [YamlIgnore] public string? Race { get; set; }       // written as a trailing comment only
+        [YamlIgnore] public string? Race { get; set; }       // used for race_summary + trailing comment
+        [YamlIgnore] public string? Sex { get; set; }        // "F"/"M" — used for race_summary only
     }
 
-    class WhitelistDoc { public string? Plugin { get; set; } public List<FaceEntry> Faces { get; set; } = new(); }
+    // Female/male face counts for one race (the per-mod coverage summary surfaced in Mod Creator).
+    public class RaceCount { public int F { get; set; } public int M { get; set; } }
+
+    class WhitelistDoc
+    {
+        public string? Plugin { get; set; }
+        public Dictionary<string, RaceCount>? RaceSummary { get; set; }   // key = "raceSummary" via CamelCase convention
+        public List<FaceEntry> Faces { get; set; } = new();
+    }
     class BlacklistDoc { public List<FaceEntry> Npcs { get; set; } = new(); }
 
     static readonly IDeserializer De = new DeserializerBuilder()
@@ -66,6 +75,39 @@ static class Library
         catch { return new HashSet<string>(StringComparer.OrdinalIgnoreCase); }  // corrupt file => block all, never crash
     }
 
+    // Full entries (key + optional `as` race override), or empty if no whitelist file.
+    public static List<FaceEntry> LoadWhitelistEntries(string plugin)
+    {
+        var p = WhitelistPath(plugin);
+        if (!File.Exists(p)) return new();
+        try
+        {
+            var doc = De.Deserialize<WhitelistDoc>(File.ReadAllText(p)) ?? new WhitelistDoc();
+            return doc.Faces.Where(f => !string.IsNullOrWhiteSpace(f.Key)).ToList();
+        }
+        catch { return new(); }
+    }
+
+    // faceKey -> race the face should be POOLED as (phase-2 merger). Only entries carrying a non-empty `as`.
+    public static Dictionary<string, string> LoadWhitelistOverrides(string plugin) =>
+        LoadWhitelistEntries(plugin)
+            .Where(f => !string.IsNullOrWhiteSpace(f.As))
+            .GroupBy(f => f.Key.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().As!.Trim(), StringComparer.OrdinalIgnoreCase);
+
+    // Per-race face counts saved with the whitelist, or null if the source has no whitelist (uncurated).
+    public static Dictionary<string, RaceCount>? LoadWhitelistSummary(string plugin)
+    {
+        var p = WhitelistPath(plugin);
+        if (!File.Exists(p)) return null;
+        try
+        {
+            var doc = De.Deserialize<WhitelistDoc>(File.ReadAllText(p)) ?? new WhitelistDoc();
+            return doc.RaceSummary ?? new Dictionary<string, RaceCount>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch { return new Dictionary<string, RaceCount>(StringComparer.OrdinalIgnoreCase); }
+    }
+
     public static string SaveWhitelist(string plugin, IEnumerable<FaceEntry> faces)
     {
         Directory.CreateDirectory(ModsDir());
@@ -73,14 +115,37 @@ static class Library
         var sb = new System.Text.StringBuilder();
         sb.Append("# FaceDiversityApp — curated face whitelist for ").Append(plugin).Append('\n');
         sb.Append("# Faces NOT listed here are BLOCKED when this mod is used in Mod Creator Mode.\n");
-        sb.Append("# `as:` (per-face race override) is reserved for a future release; leave it out for now.\n");
+        sb.Append("# `as: <Race>` (optional) pools the face AS that race — it fills that race's slots and the\n");
+        sb.Append("# target then adopts this face's own race (a consistent NPC, not a face on a mismatched body).\n");
         sb.Append("plugin: ").Append(Quote(plugin)).Append('\n');
-        sb.Append("faces:\n");
-        foreach (var f in faces.Where(f => !string.IsNullOrWhiteSpace(f.Key))
-                               .GroupBy(f => f.Key.Trim(), StringComparer.OrdinalIgnoreCase).Select(g => g.First()))
+
+        var deduped = faces.Where(f => !string.IsNullOrWhiteSpace(f.Key))
+                           .GroupBy(f => f.Key.Trim(), StringComparer.OrdinalIgnoreCase).Select(g => g.First()).ToList();
+
+        // Per-race face counts (a face counts toward its own race AND any `as:` double-dip). Surfaced in
+        // Mod Creator so the coverage of a curated mod is visible before it's added (e.g. "only 1 Orc face").
+        var summary = new SortedDictionary<string, RaceCount>(StringComparer.OrdinalIgnoreCase);
+        void Tally(string? race, string? sex)
         {
-            sb.Append("  - key: ").Append(Quote(f.Key.Trim()));
+            if (string.IsNullOrWhiteSpace(race)) return;
+            if (!summary.TryGetValue(race, out var c)) summary[race] = c = new RaceCount();
+            if (string.Equals(sex, "M", StringComparison.OrdinalIgnoreCase)) c.M++; else c.F++;
+        }
+        foreach (var f in deduped) { Tally(f.Race, f.Sex); if (!string.IsNullOrWhiteSpace(f.As)) Tally(f.As, f.Sex); }
+        if (summary.Count > 0)
+        {
+            sb.Append("# faces per race (incl. \"also serve\" double-dips) — surfaced in Mod Creator:\n");
+            sb.Append("raceSummary:\n");
+            foreach (var kv in summary) sb.Append("  ").Append(kv.Key).Append(": { f: ").Append(kv.Value.F).Append(", m: ").Append(kv.Value.M).Append(" }\n");
+        }
+
+        sb.Append("faces:\n");
+        foreach (var f in deduped)
+        {
+            // flow mapping so key + optional `as` sit on one line and still parse (block `- key:, as:` does NOT).
+            sb.Append("  - { key: ").Append(Quote(f.Key.Trim()));
             if (!string.IsNullOrWhiteSpace(f.As)) sb.Append(", as: ").Append(Quote(f.As!.Trim()));
+            sb.Append(" }");
             var c = Comment(f.EditorID, f.Race);
             if (c is not null) sb.Append("   # ").Append(c);
             sb.Append('\n');
