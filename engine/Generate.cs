@@ -84,7 +84,7 @@ static class Generate
         //      load order — many defining plugins. Kept alive (loScan) through the override loop because
         //      the target getters lazily read from the memory-mapped source; disposed at the very end.
         bool scan = Categories.IsScan(category);
-        LoadOrder<IModListingGetter<ISkyrimModGetter>>? loScan = null;
+        LoadOrder<IModListingGetter<ISkyrimModGetter>>? loScan = null, loBase = null;
         List<INpcGetter> targets;
         if (scan)
         {
@@ -97,9 +97,14 @@ static class Generate
         }
         else
         {
+            // Scan the vanilla base masters (Skyrim + DLC) so DLC-defined groups (Solstheim reavers/
+            // cultists, Dawnguard hunters/Volkihar) are reachable. Winning overrides = what the game uses.
+            // Kept alive through the override loop AND Boost (target getters read lazily); disposed after.
             var prefix = Categories.TargetPrefix(category);
-            targets = esm.Npcs.Where(n => (n.EditorID ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-                                          && OwnTraits(n) && AdultHumanoid(n)).ToList();
+            loBase = LoadOrderScan.Build(LoadOrderScan.BaseMasterPaths(game));
+            targets = loBase.PriorityOrder.Npc().WinningOverrides()
+                .Where(n => Categories.MatchesPrefix(n.EditorID ?? "", prefix) && OwnTraits(n) && AdultHumanoid(n))
+                .ToList();
         }
 
         // Build as a full ESP (new FormKeys still allocate from 0x800). The ESL/ESPFE flag is decided once
@@ -339,6 +344,9 @@ static class Generate
                 }
             }
         }
+
+        // Base-master targets are fully read now (override loop + Boost done) — release those handles.
+        if (loBase is not null) { LoadOrderScan.DisposeLoadOrder(loBase); loBase = null; }
 
         // Bake only the HDPT meshes actually worn (+ their textures) — not every hair the source shipped.
         foreach (var key in usedHdpt)

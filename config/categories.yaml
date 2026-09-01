@@ -29,9 +29,9 @@ categories:
   vampire:
     label: Vampires
     verified: true
-    target_editorid_prefix: EncVampire           # 61 own-traits (25 M / 36 F); uses *RaceVampire races
-    own_traits_only: true                         # -> needs vampire-race faces (the vampire replacer)
-    known_replacers: [ rsbotLiteralWhoVampires.esp ]
+    target_editorid_prefix: EncVampire|DLC1EncVampire  # 97 own-traits: EncVampire 61 (25M/36F) + Dawnguard
+    own_traits_only: true                         # DLC1EncVampire 36 (7M/29F, Volkihar). All *RaceVampire
+    known_replacers: [ rsbotLiteralWhoVampires.esp ]   # races -> needs vampire-race faces in the cart.
 
   thalmor:
     label: Thalmor
@@ -57,9 +57,68 @@ categories:
   guard:
     label: Guards
     verified: true
-    target_editorid_prefix: EncGuard             # 18 own-traits (15 M / 3 F). LIMITED: the city hold
-    own_traits_only: true                         # guards you see everywhere are unique per-hold records
-    known_replacers: [ rsbotLiteralWhoGuards.esp ] # (not own-traits) and are NOT covered by this.
+    target_editorid_prefix: EncGuard             # 18 own-traits (15 M / 3 F), all Nord. Covers the Civil
+    own_traits_only: true                         # War BATTLE guards on BOTH sides (9 Imperial + 9 Sons).
+    known_replacers: [ rsbotLiteralWhoGuards.esp ] # LIMITED: the ubiquitous per-hold city guards are
+    # template-based (277 of 295 Guard* records), NOT own-traits -> not reachable by override. See the
+    # "template/leveled reface" note at the bottom of this file.
+
+  # verified 2026-08-31 against Skyrim.esm. The roaming Civil War soldier PATROLS (EncSoldier) + the
+  # siege-battle archer templates (EncSiege), both sides. Multi-prefix ('|'): EditorID matches either.
+  soldier:
+    label: Soldiers (Civil War)
+    verified: true
+    target_editorid_prefix: EncSoldier|EncSiege  # 22 own-traits (19 M / 3 F): EncSoldier=20 (10 Imperial
+    own_traits_only: true                         # + 10 Sons; Nord13/Imperial3/Breton2/Redguard2),
+    known_replacers: []                           # EncSiege=2 archer templates (1 Imperial + 1 Sons).
+    # Mostly male -> feminization is the intended mode. Vanilla HAS female CW soldier voice types
+    # (CWVoiceTypeSoldierFemaleNord/Commander, VoiceTypeNPCFemaleSoldier) so feminized soldiers can speak.
+    # NOTE: reaches roaming/battle soldiers, NOT the generic leveled CWSoldier* filler (template-based).
+
+  # --- verified 2026-08-31 against Skyrim.esm (own-traits humanoid counts in comments) ---
+  alikr:
+    label: Alikr
+    verified: true
+    target_editorid_prefix: EncAlikr             # 60 own-traits (60 M / 0 F), all RedguardRace.
+    own_traits_only: true                         # All male -> feminization creates female Alikr warriors.
+    known_replacers: []                           # Needs Redguard female faces in the cart.
+
+  witch:
+    label: Witches
+    verified: true
+    target_editorid_prefix: EncWitch             # 30 own-traits (6 M / 24 F): Breton/DarkElf/HighElf/
+    own_traits_only: true                         # Imperial/Nord. Mostly female already -> refaces add
+    known_replacers: []                           # variety directly; the 6 males feminize.
+
+  hunter:
+    label: Hunters
+    verified: true
+    target_editorid_prefix: EncHunter|DLC2EncHunter  # 15 own-traits: EncHunter 9 (5M/4F, Nord/Redguard/
+    own_traits_only: true                         # WoodElf/Imperial) + Solstheim DLC2EncHunter 6 (Nord).
+    known_replacers: []                           # Roaming world filler.
+
+  # --- DLC groups (need base-master scanning: these live in Dawnguard.esm / Dragonborn.esm, not
+  #     Skyrim.esm). verified 2026-08-31 across the vanilla masters. ---
+  reaver:
+    label: Reavers (Solstheim)
+    verified: true
+    target_editorid_prefix: DLC2EncBandit        # 145 own-traits (92 M / 53 F), all DarkElfRace — the
+    own_traits_only: true                         # Solstheim "reaver" bandits (Dragonborn.esm). Big group.
+    known_replacers: []
+
+  cultist:
+    label: Cultists (Miraak)
+    verified: true
+    target_editorid_prefix: DLC2EncCultist       # 39 own-traits (29 M / 10 F): DarkElf/Nord. Miraak's
+    own_traits_only: true                         # cultists (Dragonborn.esm).
+    known_replacers: []
+
+  dawnguard:
+    label: Dawnguard (vampire hunters)
+    verified: true
+    target_editorid_prefix: EncDawnguard         # 49 own-traits (31 M / 18 F): Redguard/Orc/Nord/Imperial
+    own_traits_only: true                         # — the Dawnguard faction (Dawnguard.esm).
+    known_replacers: []
 
   # --- load-order scan (not a prefix): every UNIQUE, own-traits, named MALE across the active load
   #     order (winning overrides), any defining plugin. Substitutes named characters, not filler.
@@ -71,3 +130,15 @@ categories:
     verified: true
     scan: loadorder-males
     known_replacers: []
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# NOT-YET-COVERED: template/leveled "filler" (a separate future feature — see DESIGN.md).
+# The ubiquitous war/city filler is NOT own-traits, so the override approach can't diversify it
+# per-NPC. Verified in Skyrim.esm (2026-08-31):
+#   - Hold guards (Guard*):        295 records, 277 template-based (only 18 own-traits)
+#   - Generic CW soldiers (CWSoldier*): 18 records, ALL template-based
+# These inherit their face through a template -> ... -> leveled-character-list chain (race is the
+# FoxRace/DefaultRace placeholder). Diversifying them means editing the shared TEMPLATE / leveled
+# base records (flips a whole squad at once), which collides with sex-locked voice types and
+# guard quest/faction assumptions. Vanilla DOES ship female CW soldier voice types, so it's
+# feasible — but it's a distinct mechanism from own-traits override. Design notes in DESIGN.md.

@@ -33,7 +33,11 @@ voice_map:
   MaleOldKindly:           FemaleOldKindly
   MaleOrc:                 FemaleOrc
   MaleSlyCynical:          FemaleSultry
-  MaleSoldier:             FemaleCommander    # NOTE: no vanilla "FemaleSoldier" voice — use FemaleCommander
+  # MaleSoldier: intentionally NOT direct-mapped. It spans several races (Nord/Imperial/Breton/Redguard
+  # among the Civil War soldiers), so it routes through race_voice_fallbacks for a RACE-APPROPRIATE
+  # female voice — matching vanilla, whose own female soldiers/guards all use FemaleNord (verified: all
+  # 6 EncSoldier*F / EncGuard*F -> FemaleNord). A FemaleSoldier VTYP exists but is used by just 1 NPC in
+  # Skyrim.esm (essentially unvoiced) — avoid it; FemaleCommander (24 uses) remains a Nord/Imperial pool option.
   MaleUniqueGhost:         FemaleUniqueGhost
   MaleWarlock:             FemaleCondescending
   MaleYoungEager:          FemaleYoungEager

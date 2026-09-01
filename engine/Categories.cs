@@ -42,6 +42,16 @@ static class Categories
     public static bool IsScan(string category) =>
         All.FirstOrDefault(x => string.Equals(x.Key, category, StringComparison.OrdinalIgnoreCase))?.Scan is { Length: > 0 };
 
+    // A category's target_editorid_prefix may be a single prefix ("EncBandit") or a '|'-separated set
+    // ("EncSoldier|EncSiege") when one logical group spans several vanilla EditorID prefixes. An EditorID
+    // matches if it StartsWith ANY of them. Single-prefix specs (no '|') behave exactly as before.
+    public static bool MatchesPrefix(string editorId, string prefixSpec)
+    {
+        foreach (var p in prefixSpec.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            if (editorId.StartsWith(p, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
     public static string TargetPrefix(string category)
     {
         var c = All.FirstOrDefault(x => string.Equals(x.Key, category, StringComparison.OrdinalIgnoreCase));

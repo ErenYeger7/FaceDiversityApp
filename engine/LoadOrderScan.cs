@@ -16,6 +16,22 @@ static class LoadOrderScan
     static readonly string[] BaseMasters =
         { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm" };
 
+    // The VANILLA base masters (Skyrim + the three DLC + Update) that physically sit next to the game
+    // esm. Prefix categories scan these as a mini load order so DLC-defined generic groups (Solstheim
+    // reavers/cultists in Dragonborn.esm, Dawnguard hunters/Volkihar vampires in Dawnguard.esm) are
+    // reachable — not just Skyrim.esm. Missing masters (e.g. a base-game-only install) are skipped.
+    public static List<string> BaseMasterPaths(string gameEsmPath)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(gameEsmPath)) ?? "";
+        var paths = new List<string>();
+        foreach (var m in BaseMasters)
+        {
+            var p = Path.Combine(dir, m);
+            if (File.Exists(p)) paths.Add(p);
+        }
+        return paths;
+    }
+
     // Resolve the profile's active plugins to absolute paths, in true load order.
     //   order  = loadorder.txt (authoritative plugin order)
     //   active = plugins.txt lines starting with '*' (+ base masters)

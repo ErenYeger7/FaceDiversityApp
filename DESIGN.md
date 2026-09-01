@@ -46,6 +46,35 @@ emits this as a table + JSON.
 - **Phase 3 (GUI):** 3-pane app (sources → filter by race/voice → cart → settings/create) on the engine,
   with the coverage panel. Face previews = v2.
 
+## Not covered yet: template/leveled "filler" (future feature)
+The current engine only diversifies **own-traits** records (an NPC with its own face). The most
+*ubiquitous* NPCs — city hold guards and generic Civil War soldiers — are deliberately built the
+other way: a per-hold/per-role record inherits **Traits** from a base template, which itself often
+chains to a **leveled character list**; its `Race` is the `FoxRace`/`DefaultRace` placeholder and the
+actual face resolves at spawn time from the template leaf. Verified in Skyrim.esm (2026-08-31):
+
+| Group | Records | Template-based | Own-traits (covered) |
+|-------|--------:|---------------:|---------------------:|
+| Hold guards (`Guard*`) | 295 | 277 | 18 |
+| Generic CW soldiers (`CWSoldier*`) | 18 | 18 | 0 |
+
+The `guard`/`soldier` categories catch the **own-traits** war NPCs (`EncGuard` battle guards,
+`EncSoldier`/`EncSiege` patrols — both sides). The template filler above needs a **different
+mechanism**, tracked here as a separate future feature:
+
+- **Approach:** reface/feminize the shared **template base** (and/or the leveled-list leaves) rather
+  than per-NPC overrides — one edit flips the whole squad. A single template touches many spawns.
+- **Hazard 1 — voice:** template soldiers/guards are **sex-locked** by voice type; flipping one female
+  without a female voice type = silent/mis-voiced NPC. Vanilla *does* ship female CW voices
+  (`CWVoiceTypeSoldierFemaleNord`/`…FemaleCommander`, `VoiceTypeNPCFemaleSoldier`), so it's feasible —
+  the feature must assign them.
+- **Hazard 2 — squad uniformity:** editing one template makes every inheritor share a face. Real
+  diversity needs either several template variants or a leveled list of faces, not a single swap.
+- **Hazard 3 — quest/faction:** guards carry hold/quest/dialogue assumptions; changing sex/appearance
+  on the base can ripple into scripted scenes. Scope carefully and test.
+- **Scope note:** this is CW/guard-specific and higher-risk than the override path; keep it a distinct
+  opt-in mode, not folded into the own-traits categories.
+
 ## Layout
 - `config/` — `voice_map.yaml`, `categories.yaml` (tweakable).
 - `engine/` — .NET CLI (Mutagen). Commands: `analyze`, later `generate`.

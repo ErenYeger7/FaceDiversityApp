@@ -2,6 +2,7 @@ using Mutagen.Bethesda;
 using Mutagen.Bethesda.Skyrim;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Order;
 using System.Text.Json;
 
 // Shared face model for the GUI. Enumerates every female "face" a source offers (the pickable pool)
@@ -59,23 +60,30 @@ static class Faces
     // Per-race target demand for a category (own-traits leaves only, matching Generate's target set).
     public static List<RaceDemand> Demand(string game, string category)
     {
-        using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
-        var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
-        string RaceOf(FormKey fk) => raceName.TryGetValue(fk, out var s) && s != "" ? s : fk.ToString();
-        var prefix = Categories.TargetPrefix(category);
-
-        var m = new Dictionary<string, int>(); var f = new Dictionary<string, int>();
-        var code = new Dictionary<string, string>();
-        foreach (var n in esm.Npcs.Where(n =>
-            (n.EditorID ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && OwnTraits(n)
-            && !RaceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)))
+        // Scan the vanilla base masters (Skyrim + DLC) as a mini load order so DLC-defined generic groups
+        // are reachable. Winning overrides = the record the game actually uses. Race names resolve from the
+        // full cache (DLC races too). Disposed at the end (each master is memory-mapped).
+        var lo = LoadOrderScan.Build(LoadOrderScan.BaseMasterPaths(game));
+        try
         {
-            var r = RaceOf(n.Race.FormKey);
-            var d = Fem(n) ? f : m; d[r] = d.GetValueOrDefault(r) + 1;
-            code[r] = n.Race.FormKey.ToString();
+            var cache = lo.ToImmutableLinkCache();
+            string RaceOf(FormKey fk) => cache.TryResolve<IRaceGetter>(fk, out var r) && !string.IsNullOrEmpty(r.EditorID) ? r.EditorID! : fk.ToString();
+            var prefix = Categories.TargetPrefix(category);
+
+            var m = new Dictionary<string, int>(); var f = new Dictionary<string, int>();
+            var code = new Dictionary<string, string>();
+            foreach (var n in lo.PriorityOrder.Npc().WinningOverrides().Where(n =>
+                Categories.MatchesPrefix(n.EditorID ?? "", prefix) && OwnTraits(n)
+                && !RaceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)))
+            {
+                var r = RaceOf(n.Race.FormKey);
+                var d = Fem(n) ? f : m; d[r] = d.GetValueOrDefault(r) + 1;
+                code[r] = n.Race.FormKey.ToString();
+            }
+            return m.Keys.Union(f.Keys).OrderBy(x => x)
+                .Select(r => new RaceDemand(r, m.GetValueOrDefault(r), f.GetValueOrDefault(r), code.GetValueOrDefault(r, ""), r)).ToList();
         }
-        return m.Keys.Union(f.Keys).OrderBy(x => x)
-            .Select(r => new RaceDemand(r, m.GetValueOrDefault(r), f.GetValueOrDefault(r), code.GetValueOrDefault(r, ""), r)).ToList();
+        finally { LoadOrderScan.DisposeLoadOrder(lo); }
     }
 
     // Per-race target demand for the load-order "all_males" scan: every winning UNIQUE named male, keyed
@@ -122,7 +130,7 @@ static class Faces
         string RaceOf(FormKey fk) => raceName.TryGetValue(fk, out var s) && s != "" ? s : fk.ToString();
         var prefix = Categories.TargetPrefix(category);
         var keys = new HashSet<FormKey>(esm.Npcs.Where(n =>
-            (n.EditorID ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && OwnTraits(n)
+            Categories.MatchesPrefix(n.EditorID ?? "", prefix) && OwnTraits(n)
             && !RaceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)).Select(n => n.FormKey));
         int count = 0;
         foreach (var ll in esm.LeveledNpcs)
