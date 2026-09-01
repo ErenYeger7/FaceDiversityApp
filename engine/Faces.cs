@@ -60,28 +60,39 @@ static class Faces
     // Per-race target demand for a category (own-traits leaves only, matching Generate's target set).
     public static List<RaceDemand> Demand(string game, string category)
     {
-        // Scan the vanilla base masters (Skyrim + DLC) as a mini load order so DLC-defined generic groups
-        // are reachable. Winning overrides = the record the game actually uses. Race names resolve from the
-        // full cache (DLC races too). Disposed at the end (each master is memory-mapped).
+        var prefix = Categories.TargetPrefix(category);
+
+        // JOIN KEY race resolution = the game esm (Skyrim.esm) ONLY — byte-for-byte identical to
+        // Faces.Enumerate.PoolRace AND Generate's RaceOf. This is the invariant: demand rows line up with
+        // the harvested face pool and with what generation actually pools. Resolving the key via the
+        // base-master cache instead (names for DLC/mod races the game esm returns as hex) silently breaks
+        // the join the moment a race isn't defined in the game esm.
+        using var gesm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
+        var esmRace = gesm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
+        string JoinRace(FormKey fk) => esmRace.TryGetValue(fk, out var s) && s != "" ? s : fk.ToString();
+
+        // Targets = winning overrides across the vanilla base masters (so DLC groups are reachable). The
+        // DISPLAY name resolves DLC race EditorIDs from the full base-master cache (JoinRace would show hex).
         var lo = LoadOrderScan.Build(LoadOrderScan.BaseMasterPaths(game));
         try
         {
             var cache = lo.ToImmutableLinkCache();
-            string RaceOf(FormKey fk) => cache.TryResolve<IRaceGetter>(fk, out var r) && !string.IsNullOrEmpty(r.EditorID) ? r.EditorID! : fk.ToString();
-            var prefix = Categories.TargetPrefix(category);
+            string DisplayName(FormKey fk) => cache.TryResolve<IRaceGetter>(fk, out var r) && !string.IsNullOrEmpty(r.EditorID) ? r.EditorID! : JoinRace(fk);
 
             var m = new Dictionary<string, int>(); var f = new Dictionary<string, int>();
-            var code = new Dictionary<string, string>();
+            var code = new Dictionary<string, string>(); var name = new Dictionary<string, string>();
             foreach (var n in lo.PriorityOrder.Npc().WinningOverrides().Where(n =>
                 Categories.MatchesPrefix(n.EditorID ?? "", prefix) && OwnTraits(n)
-                && !RaceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)))
+                && !JoinRace(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)))
             {
-                var r = RaceOf(n.Race.FormKey);
-                var d = Fem(n) ? f : m; d[r] = d.GetValueOrDefault(r) + 1;
-                code[r] = n.Race.FormKey.ToString();
+                var key = JoinRace(n.Race.FormKey);       // JOIN KEY (matches faces + generation)
+                var d = Fem(n) ? f : m; d[key] = d.GetValueOrDefault(key) + 1;
+                code[key] = n.Race.FormKey.ToString();
+                name[key] = DisplayName(n.Race.FormKey);  // pretty display (DLC races resolved)
             }
             return m.Keys.Union(f.Keys).OrderBy(x => x)
-                .Select(r => new RaceDemand(r, m.GetValueOrDefault(r), f.GetValueOrDefault(r), code.GetValueOrDefault(r, ""), r)).ToList();
+                .Select(r => new RaceDemand(r, m.GetValueOrDefault(r), f.GetValueOrDefault(r),
+                    code.GetValueOrDefault(r, ""), name.GetValueOrDefault(r, r))).ToList();
         }
         finally { LoadOrderScan.DisposeLoadOrder(lo); }
     }
