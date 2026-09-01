@@ -16,7 +16,7 @@ static class Serve
 
     // live paths (from config/settings.json, else the built-in SME fallback; all overridable via flags)
     static string Game = "", Mods = "", Config = "", VoiceMap = "", WebRoot = "", OutDir = "",
-                  Profiles = "", Profile = "", BotPresets = "", GameData = "";
+                  Profiles = "", Profile = "", BotPresets = "", GameData = "", MugshotRoot = "";
 
     // built-in fallbacks so the app still runs on this PC even with no settings.json
     const string DefGame = "C:/Modlists/SME/Stock Game/Data/Skyrim.esm";
@@ -56,6 +56,7 @@ static class Serve
         // sits with its textures (normal Steam install, and the SME Stock Game). Overridable for the rare
         // split where the ESM you point at is a cleaned-masters copy separate from the BSA install.
         GameData = Def(s.GameData, Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game);
+        MugshotRoot = Norm(Def(s.MugshotRoot, ""));
         Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
         Config = Path.Combine(home, "config", "categories.yaml");
         VoiceMap = Path.Combine(home, "config", "voice_map.yaml");
@@ -69,6 +70,7 @@ static class Serve
                 case "--profiles": Profiles = args[++i]; break;
                 case "--profile": Profile = args[++i]; break;
                 case "--bot-presets": BotPresets = args[++i]; break;
+                case "--mugshot-root": MugshotRoot = args[++i]; break;
                 case "--game-version": /* handled in Program.cs */ i++; break;
                 case "--config": Config = args[++i]; break;
                 case "--voice-map": VoiceMap = args[++i]; break;
@@ -132,7 +134,31 @@ static class Serve
                 case "/api/faces":
                 {
                     var srcs = q.GetValues("source") ?? Array.Empty<string>();
-                    Send(ctx, 200, "application/json", Json(Faces.Enumerate(Game, srcs))); return;
+                    var faces = Faces.Enumerate(Game, srcs);
+                    // Mod Creator Mode passes library=1 so the library curbs the pool: a source WITH a
+                    // whitelist is narrowed to its approved faces; a globally-blacklisted NPC is dropped
+                    // from every source. Library Mode omits the flag (it must see & curate everything).
+                    if (q["library"] == "1") faces = ApplyLibrary(faces);
+                    Send(ctx, 200, "application/json", Json(faces)); return;
+                }
+                case "/api/library/mod":
+                {
+                    if (ctx.Request.HttpMethod == "POST") { HandleSaveWhitelist(ctx); return; }
+                    var plugin = q["plugin"];
+                    if (string.IsNullOrWhiteSpace(plugin)) { Send(ctx, 400, "application/json", Json(new { error = "plugin required" })); return; }
+                    var wl = Library.LoadWhitelist(plugin!);
+                    Send(ctx, 200, "application/json", Json(new { plugin, hasWhitelist = wl != null, keys = wl?.ToArray() ?? Array.Empty<string>() })); return;
+                }
+                case "/api/library/blacklist":
+                {
+                    if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
+                    Send(ctx, 200, "application/json", Json(new { keys = Library.LoadBlacklist().ToArray() })); return;
+                }
+                case "/api/mugshot":
+                {
+                    var p = Mugshots.Resolve(MugshotRoot, q["formKey"]);
+                    if (p is null || !File.Exists(p)) { Send(ctx, 404, "text/plain", Encoding.UTF8.GetBytes("no mugshot")); return; }
+                    SendImage(ctx, p); return;
                 }
                 case "/api/demand":
                 {
@@ -198,12 +224,13 @@ static class Serve
         profiles = Profiles, profile = Profile, profileList = ListProfiles(),
         botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release),
         gameVersions = new[] { "SkyrimSE", "SkyrimVR" },
+        mugshotRoot = MugshotRoot, libraryRoot = Library.Root(),
         settingsPath = Settings.FilePath,
         feminizeDefault = true,
         categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan) })
     };
 
-    record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData);
+    record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData, string? MugshotRoot);
 
     // Persist per-PC settings from the UI: update the live server config + config/settings.json + the
     // global game release. Only non-empty fields are applied (blank = keep current live value).
@@ -226,12 +253,15 @@ static class Serve
         else if (modsChanged) Profiles = DeriveProfiles(Mods);
         if (!string.IsNullOrWhiteSpace(req.Profile)) Profile = req.Profile!.Trim();
         if (!string.IsNullOrWhiteSpace(req.BotPresets)) BotPresets = req.BotPresets!.Trim();
+        // mugshot root is nullable-clearable: unlike the others, an empty string is a legitimate value
+        // ("no pack configured"), so apply it whenever the field is PRESENT (non-null), blank included.
+        if (req.MugshotRoot is not null) { MugshotRoot = req.MugshotRoot.Trim(); Mugshots.Invalidate(); }
         // base-game Data folder: explicit override wins; else if game changed, re-derive as its folder.
         if (!string.IsNullOrWhiteSpace(req.GameData)) GameData = req.GameData!.Trim();
         else if (gameChanged) GameData = Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game;
         if (!string.IsNullOrWhiteSpace(req.GameVersion)) GameCfg.Release = GameCfg.Parse(req.GameVersion);
 
-        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
+        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData); MugshotRoot = Norm(MugshotRoot);
 
         // the selected profile may not exist under a newly-derived profiles dir — fall back to the first.
         var profileList = ListProfiles();
@@ -242,13 +272,14 @@ static class Serve
         Settings.Current = new AppSettings
         {
             GameVersion = GameCfg.Canon(GameCfg.Release),
-            Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets
+            Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets,
+            MugshotRoot = MugshotRoot
         };
         Settings.Save();
         Send(ctx, 200, "application/json", Json(new
         {
             ok = true, saved = Settings.FilePath, gameVersion = GameCfg.Canon(GameCfg.Release),
-            profiles = Profiles, profile = Profile, profileList, gameData = GameData
+            profiles = Profiles, profile = Profile, profileList, gameData = GameData, mugshotRoot = MugshotRoot
         }));
     }
 
@@ -427,6 +458,58 @@ static class Serve
         return (code, sw.ToString());
     }
 
+    // ---- library ----
+
+    // Apply the personal library to a harvested face list (Mod Creator Mode). Keep a face when its source
+    // has no whitelist (uncurated => pool all) OR the face is whitelisted; always drop a face whose NPC is
+    // globally blacklisted — the blacklist wins even over a whitelist entry.
+    static List<Faces.FaceInfo> ApplyLibrary(List<Faces.FaceInfo> faces)
+    {
+        var blacklist = Library.LoadBlacklist();
+        var wl = new Dictionary<string, HashSet<string>?>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string>? WlFor(string src)
+        {
+            if (!wl.TryGetValue(src, out var s)) { s = Library.LoadWhitelist(src); wl[src] = s; }
+            return s;
+        }
+        return faces.Where(f =>
+        {
+            if (blacklist.Contains(f.FormKey)) return false;   // global veto
+            var s = WlFor(f.Source);
+            return s is null || s.Contains(f.FormKey);          // uncurated source => keep all
+        }).ToList();
+    }
+
+    record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race);
+    record SaveWhitelistReq(string? Plugin, List<FaceEntryReq>? Faces, bool Remove = false);
+    record SaveBlacklistReq(List<FaceEntryReq>? Npcs);
+
+    static Library.FaceEntry ToEntry(FaceEntryReq r) => new() { Key = r.Key ?? "", As = r.As, EditorID = r.EditorID, Race = r.Race };
+
+    static void HandleSaveWhitelist(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        SaveWhitelistReq? req;
+        try { req = JsonSerializer.Deserialize<SaveWhitelistReq>(body, J); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        if (req is null || string.IsNullOrWhiteSpace(req.Plugin)) { Send(ctx, 400, "application/json", Json(new { error = "plugin required" })); return; }
+        if (req.Remove) { var removed = Library.RemoveWhitelist(req.Plugin!); Send(ctx, 200, "application/json", Json(new { ok = true, removed })); return; }
+        var faces = (req.Faces ?? new()).Select(ToEntry).ToList();
+        var path = Library.SaveWhitelist(req.Plugin!, faces);
+        Send(ctx, 200, "application/json", Json(new { ok = true, path, count = faces.Count(f => !string.IsNullOrWhiteSpace(f.Key)) }));
+    }
+
+    static void HandleSaveBlacklist(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        SaveBlacklistReq? req;
+        try { req = JsonSerializer.Deserialize<SaveBlacklistReq>(body, J); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        var npcs = (req?.Npcs ?? new()).Select(ToEntry).ToList();
+        var path = Library.SaveBlacklist(npcs);
+        Send(ctx, 200, "application/json", Json(new { ok = true, path, count = npcs.Count(n => !string.IsNullOrWhiteSpace(n.Key)) }));
+    }
+
     // ---- http helpers ----
     static byte[] Json(object o) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(o, J));
 
@@ -440,6 +523,19 @@ static class Serve
         ctx.Response.OutputStream.Close();
     }
     static void TrySend(HttpListenerContext ctx, int s, string m, byte[] b) { try { Send(ctx, s, m, b); } catch { } }
+
+    // Mugshot PNGs are static content — let the browser cache them (the grid re-requests per <img>),
+    // overriding the no-store default the JSON API uses.
+    static void SendImage(HttpListenerContext ctx, string path)
+    {
+        var body = File.ReadAllBytes(path);
+        ctx.Response.StatusCode = 200;
+        ctx.Response.ContentType = "image/png";
+        ctx.Response.Headers["Cache-Control"] = "private, max-age=3600";
+        ctx.Response.ContentLength64 = body.Length;
+        ctx.Response.OutputStream.Write(body, 0, body.Length);
+        ctx.Response.OutputStream.Close();
+    }
 
     static string Mime(string f) => Path.GetExtension(f).ToLowerInvariant() switch
     {

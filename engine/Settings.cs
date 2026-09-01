@@ -34,6 +34,7 @@ class AppSettings
     public string Profiles { get; set; } = "";    // MO2 profiles dir
     public string Profile { get; set; } = "";     // active MO2 profile name
     public string BotPresets { get; set; } = "";  // Bodies of Tamriel BodySlide SliderPresets dir
+    public string MugshotRoot { get; set; } = ""; // Library Mode: root of a local EasyNPC/NPC-PC-2 mugshot pack
 }
 
 static class Settings

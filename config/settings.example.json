@@ -5,5 +5,6 @@
   "mods": "C:/path/to/ModOrganizer/mods",
   "profiles": "C:/path/to/ModOrganizer/profiles",
   "profile": "Your MO2 Profile Name",
-  "botPresets": "C:/path/to/mods/600+ 3BA Bodies of Tamriel/CalienteTools/Bodyslide/SliderPresets"
+  "botPresets": "C:/path/to/mods/600+ 3BA Bodies of Tamriel/CalienteTools/Bodyslide/SliderPresets",
+  "mugshotRoot": "C:/path/to/mods/Some Mugshots Pack"
 }

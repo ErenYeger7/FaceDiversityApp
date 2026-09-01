@@ -69,6 +69,35 @@
     border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
   @keyframes sp{to{transform:rotate(360deg)}}
   .hidden{display:none}
+  /* mode toggle */
+  .modeToggle{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .modeToggle button{border:none;border-radius:0;background:var(--panel2);padding:5px 13px;font-size:12px}
+  .modeToggle button.on{background:var(--accent);color:#08121f;font-weight:600}
+  /* library thumbnails + blacklist */
+  .libcol{display:none}
+  .app.libmode .libcol{display:table-cell}
+  .app.libmode .creatoronly{display:none}
+  td.thumbcol{width:52px}
+  .thumb{width:46px;height:46px;border-radius:5px;object-fit:cover;object-position:center top;
+    background:var(--panel2);border:1px solid var(--line);display:block}
+  .thumb.ph{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:9px;text-align:center;line-height:1.05;padding:2px}
+  .tag-bl{background:rgba(224,101,75,.18);color:var(--bad);border:1px solid rgba(224,101,75,.5);
+    border-radius:5px;padding:0 5px;font-size:10px;font-weight:600;margin-left:4px}
+  tr.blacklisted td:not(.thumbcol):not(:last-child){opacity:.5}
+  .blbtn{cursor:pointer;font-size:14px;line-height:1;background:none;border:none;padding:2px 3px;filter:grayscale(1);opacity:.45}
+  .blbtn:hover{opacity:.8}
+  .blbtn.on{filter:none;opacity:1}
+  /* face lightbox */
+  #lightbox{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.85);display:flex;
+    align-items:center;justify-content:center;padding:28px;cursor:zoom-out}
+  #lightbox.hidden{display:none}
+  #lightbox img{max-width:min(92vw,900px);max-height:86vh;object-fit:contain;border-radius:8px;
+    border:1px solid var(--line);box-shadow:0 10px 44px rgba(0,0,0,.6)}
+  #lbCap{position:fixed;bottom:16px;left:0;right:0;text-align:center;color:#fff;font-size:13px;
+    text-shadow:0 1px 4px #000;pointer-events:none}
+  #lbClose{position:fixed;top:14px;right:18px;font-size:18px;line-height:1;background:var(--panel2);
+    border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:5px 11px;cursor:pointer}
+  img.thumb{cursor:zoom-in}
 </style>
 </head>
 <body>
@@ -89,6 +118,10 @@ window.addEventListener('unhandledrejection',function(ev){
 <header>
   <h1>FaceDiversityApp</h1>
   <span class="sub" id="hdrSub">personal use only — do not redistribute</span>
+  <div class="modeToggle" style="margin-left:auto" title="Mod Creator builds an output mod; Library curates which faces you keep (whitelist) + blacklist NPCs">
+    <button id="modeCreator" class="on">Mod Creator</button>
+    <button id="modeLibrary">Library</button>
+  </div>
 </header>
 
 <div class="app">
@@ -106,6 +139,8 @@ window.addEventListener('unhandledrejection',function(ev){
       <input type="text" id="gameDataInput" placeholder="…\Skyrim Special Edition\Data (auto = folder of Skyrim.esm)">
       <label class="fld">Bodies of Tamriel — SliderPresets folder <span class="muted">(for SexPlague Bodies)</span></label>
       <input type="text" id="botPresetsInput" placeholder="…\CalienteTools\Bodyslide\SliderPresets">
+      <label class="fld">Mugshots pack folder <span class="muted">(Library Mode thumbnails — EasyNPC / NPC-PC-2 layout root; blank = names only)</span></label>
+      <input type="text" id="mugshotRootInput" placeholder="…\mods\Some Mugshots Pack (root that holds the mod/master subfolders)">
       <div class="row" style="margin-top:8px;gap:8px;align-items:center">
         <button class="mini" id="saveSettingsBtn">Save settings</button>
         <span class="muted" id="settingsSaved"></span>
@@ -148,7 +183,7 @@ window.addEventListener('unhandledrejection',function(ev){
         <input type="text" id="faceSearch" class="flex1" placeholder="search EditorID…" style="min-width:110px">
       </div>
       <div class="row wrap" style="margin-bottom:8px">
-        <button class="mini" id="selUsable" title="select only faces this category can use (right race + gender)">Usable</button>
+        <button class="mini creatoronly" id="selUsable" title="select only faces this category can use (right race + gender)">Usable</button>
         <button class="mini" id="selAll">All</button>
         <button class="mini" id="selNone">None</button>
         <button class="mini" id="selInvert">Invert</button>
@@ -159,18 +194,20 @@ window.addEventListener('unhandledrejection',function(ev){
       <div class="facewrap">
         <table id="faceTable">
           <thead><tr>
-            <th style="width:26px"></th><th data-k="editorID">Face (EditorID)</th>
+            <th style="width:26px"></th><th class="libcol thumbcol"></th><th data-k="editorID">Face (EditorID)</th>
             <th data-k="sex" style="width:34px">Sex</th>
             <th data-k="poolRace">Race</th><th data-k="source">Source</th>
+            <th class="libcol" style="width:30px" title="blacklist across all mods">⛔</th>
           </tr></thead>
-          <tbody id="faceBody"><tr><td colspan="5" class="muted" style="padding:10px">Add a source mod above to list its faces.</td></tr></tbody>
+          <tbody id="faceBody"><tr><td colspan="7" class="muted" style="padding:10px">Add a source mod above to list its faces.</td></tr></tbody>
         </table>
       </div>
     </div>
   </section>
 
-  <!-- ===================== MIDDLE: coverage ===================== -->
+  <!-- ===================== MIDDLE: coverage (creator) / curate (library) ===================== -->
   <section class="pane">
+    <div id="creatorMid">
     <h2>3 · Coverage preview</h2>
     <div class="card">
       <div class="row" style="gap:16px;margin-bottom:8px">
@@ -193,10 +230,26 @@ window.addEventListener('unhandledrejection',function(ev){
         <th style="text-align:right">faces</th><th>result</th>
       </tr></thead><tbody id="covBody"></tbody></table>
     </div>
+    </div><!-- /creatorMid -->
+
+    <div id="libraryMid" class="hidden">
+      <h2>3 · Curate → Library</h2>
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">Tick the faces you want to <b>keep</b> from each source. Faces left unticked are treated as <b>blocked</b> for that mod in Mod Creator Mode. Saving writes one whitelist per source under <code>library/mods/</code>.</div>
+        <div id="libSummary"><div class="muted">Add a source mod to curate.</div></div>
+        <button class="primary" id="saveLibBtn" style="width:100%;margin-top:10px" disabled>Save whitelist(s)</button>
+        <div id="saveLibOut"></div>
+      </div>
+      <div class="card">
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">HOW THE LIBRARY IS USED</h3>
+        <div class="muted">In <b>Mod Creator</b> mode, a source that has a saved whitelist contributes only its ticked faces; a source with none behaves exactly as before (all faces pooled). Globally-blacklisted NPCs (right) are removed from every source. The library lives on this PC only and is reused across modlists.</div>
+      </div>
+    </div>
   </section>
 
-  <!-- ===================== RIGHT: settings + create ===================== -->
+  <!-- ===================== RIGHT: output (creator) / blacklist (library) ===================== -->
   <section class="pane">
+    <div id="creatorRight">
     <h2>4 · Output</h2>
     <div class="card">
       <label class="fld">Category</label>
@@ -263,7 +316,24 @@ window.addEventListener('unhandledrejection',function(ev){
       </div>
       <div id="auditOut"></div>
     </div>
+    </div><!-- /creatorRight -->
+
+    <div id="libraryRight" class="hidden">
+      <h2>4 · ⛔ Global blacklist</h2>
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">NPCs you never want from <b>any</b> mod. Click the ⛔ on a face to add it. Keyed by origin FormKey, so it blocks every replacer's take on that NPC — in both modes. Saved instantly to <code>library/blacklisted_npcs.yaml</code>.</div>
+        <div class="stat"><span>Blacklisted NPCs</span><b id="blCount">0</b> <span class="muted" id="blSaved" style="margin-left:6px"></span></div>
+        <div id="blList" style="margin-top:8px"><div class="muted">none yet</div></div>
+      </div>
+    </div>
   </section>
+</div>
+
+<!-- click-to-zoom face lightbox (Library Mode thumbnails) -->
+<div id="lightbox" class="hidden">
+  <img id="lbImg" alt="">
+  <div id="lbCap"></div>
+  <button id="lbClose" title="close (Esc)">✕</button>
 </div>
 
 <script>
@@ -277,7 +347,8 @@ async function api(p,o){
   try { return JSON.parse(txt); }
   catch(e){ throw new Error('non-JSON from '+p+': '+txt.slice(0,300)); }
 }
-const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1 };
+const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1,
+  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{} };
 
 // ---------- boot ----------
 (async function boot(){
@@ -302,9 +373,15 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
   $('#gamePathInput').value = winPath(state.config.game);
   $('#gameDataInput').value = winPath(state.config.gameData);
   $('#botPresetsInput').value = winPath(state.config.botPresets);
+  $('#mugshotRootInput').value = winPath(state.config.mugshotRoot||'');
   $('#profilesPath').textContent = state.config.profiles ? ('profiles (auto): '+winPath(state.config.profiles)) : '';
   $('#settingsPathNote').textContent = state.config.settingsPath ? ('saved to: '+winPath(state.config.settingsPath)) : '';
   $('#saveSettingsBtn').onclick = saveSettings;
+
+  // mode toggle + library controls
+  $('#modeCreator').onclick = ()=>setMode('creator');
+  $('#modeLibrary').onclick = ()=>setMode('library');
+  $('#saveLibBtn').onclick = saveLibrary;
 
   // MO2 environment controls
   $('#modsPath').value = winPath(state.config.mods);
@@ -355,13 +432,16 @@ async function saveSettings(){
     gameData: $('#gameDataInput').value.trim(),
     mods: $('#modsPath').value.trim(),
     profile: $('#profile').value,
-    botPresets: $('#botPresetsInput').value.trim()
+    botPresets: $('#botPresetsInput').value.trim(),
+    mugshotRoot: $('#mugshotRootInput').value.trim()
   };
   btn.disabled=true; note.textContent='saving…';
   try{
     const r = await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     note.textContent = '✔ saved ('+(r.gameVersion||'')+')';
     state.config.game = body.game; state.config.gameVersion = r.gameVersion;
+    state.config.mugshotRoot = (r.mugshotRoot!=null? r.mugshotRoot : body.mugshotRoot);
+    if(state.mode==='library') renderFaces();   // thumbnails follow the new pack root
     const gp=$('#gamePath'); if(gp) gp.textContent = winPath(body.game);
     // the profiles dir is auto-derived from mods server-side — repopulate the profile list + show the path
     if(r.profileList){
@@ -521,17 +601,38 @@ function faceUsable(f){
 async function refreshFaces(){
   const prevIds = new Set(state.faces.map(f=>f.id));     // faces we already knew about
   const prevSel = state.selected;                        // and their selection state
-  if(!state.sources.length){ state.faces=[]; state.selected=new Set(); renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage(); return; }
+  if(!state.sources.length){ state.faces=[]; state.selected=new Set(); renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage(); renderLibSummary(); return; }
   const qs = state.sources.map(s=>'source='+encodeURIComponent(s.path)).join('&');
-  state.faces = await api('/api/faces?'+qs);
-  // default: newly-added faces start selected ONLY if usable for this category; keep prior curation for
-  // faces we already had. So adding a mod selects just its usable faces, not every face it ships.
+  // Creator honors the library (whitelist narrows the pool, blacklist drops NPCs); curation must see all.
+  const lib = state.mode==='creator' ? '&library=1' : '';
+  state.faces = await api('/api/faces?'+qs+lib);
   state.selected = new Set();
-  for(const f of state.faces){
-    const isNew = !prevIds.has(f.id);
-    if(isNew ? faceUsable(f) : prevSel.has(f.id)) state.selected.add(f.id);
+  if(state.mode==='library'){
+    await ensureWhitelists();
+    // default selection = each source's SAVED whitelist; preserve in-session curation for faces we already had.
+    for(const f of state.faces){
+      if(prevIds.has(f.id)){ if(prevSel.has(f.id)) state.selected.add(f.id); }
+      else { const w = state.wl[f.source]; if(w && w.has(f.formKey)) state.selected.add(f.id); }
+    }
+  } else {
+    // default: newly-added faces start selected ONLY if usable for this category; keep prior curation.
+    for(const f of state.faces){
+      const isNew = !prevIds.has(f.id);
+      if(isNew ? faceUsable(f) : prevSel.has(f.id)) state.selected.add(f.id);
+    }
   }
-  renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage();
+  renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage(); renderLibSummary();
+  if(state.mode==='library') renderBlacklist();   // now that faces are loaded, resolve blacklisted NPC names
+}
+
+// Load each loaded source's whitelist (null = uncurated) once, so library selection can default to it.
+async function ensureWhitelists(){
+  for(const s of state.sources){
+    if(state.wl[s.plugin]!==undefined) continue;
+    try{ const r = await api('/api/library/mod?plugin='+encodeURIComponent(s.plugin));
+      state.wl[s.plugin] = r.hasWhitelist ? new Set(r.keys) : null;
+    }catch{ state.wl[s.plugin] = null; }
+  }
 }
 
 function renderSourceFilter(){
@@ -564,17 +665,46 @@ function renderFaces(){
   $('#faceCount').textContent = state.faces.length ? `· ${rows.length} shown / ${state.faces.length} total` : '';
   const k = state.sortK;
   if(k) rows.sort((a,b)=>(''+(a[k]||'')).localeCompare(''+(b[k]||''))*state.sortDir);
-  $('#faceBody').innerHTML = rows.length ? rows.map(f=>`
-    <tr class="${faceUsable(f)?'':'unusable'}" title="${faceUsable(f)?'':'not used by this category (wrong race/gender)'}">
+  const lib = state.mode==='library';
+  $('#faceBody').innerHTML = rows.length ? rows.map(f=>{
+    const bl = state.blacklist.has(f.formKey);
+    const dim = (!lib && !faceUsable(f)) ? 'unusable' : '';
+    const cls = [dim, bl?'blacklisted':''].filter(Boolean).join(' ');
+    const ttl = lib ? '' : (faceUsable(f)?'':'not used by this category (wrong race/gender)');
+    const thumb = lib ? `<td class="libcol thumbcol">${thumbHtml(f)}</td>` : '';
+    const blcell = lib ? `<td class="libcol" style="text-align:center"><button class="blbtn ${bl?'on':''}" title="${bl?'blacklisted everywhere — click to remove':'blacklist this NPC across ALL mods'}" onclick="togBlack('${jsq(f.formKey)}','${jsq(f.editorID||'')}','${jsq(f.poolRace||'')}')">⛔</button></td>` : '';
+    return `<tr class="${cls}" title="${esc(ttl)}">
       <td><input type="checkbox" ${state.selected.has(f.id)?'checked':''} onchange="tog('${jsq(f.id)}',this.checked)"></td>
-      <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}</td>
+      ${thumb}
+      <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
       <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
       <td>${esc(f.poolRace)}</td>
       <td class="muted" title="${esc(f.source)}">${esc(f.source.replace(/\.esp$/i,''))}</td>
-    </tr>`).join('') :
-    '<tr><td colspan="5" class="muted" style="padding:10px">no faces match the filter.</td></tr>';
+      ${blcell}
+    </tr>`;
+  }).join('') :
+    '<tr><td colspan="7" class="muted" style="padding:10px">no faces match the filter.</td></tr>';
   updateSelCount();
 }
+
+// thumbnail: <img> hitting /api/mugshot; falls back to a placeholder card on 404 / no pack configured.
+function thumbHtml(f){
+  if(!state.config || !state.config.mugshotRoot) return `<div class="thumb ph">no pack</div>`;
+  const cap = (f.editorID||'(no EditorID)')+' · '+(f.poolRace||'')+' · '+f.source;
+  return `<img class="thumb" loading="lazy" alt="" src="/api/mugshot?formKey=${encodeURIComponent(f.formKey)}" onerror="thumbFail(this)" onclick="showFace('${jsq(f.formKey)}','${jsq(cap)}')">`;
+}
+window.thumbFail = function(img){ img.onerror=null; const d=document.createElement('div'); d.className='thumb ph'; d.textContent='no img'; img.replaceWith(d); };
+
+// Lightbox: full-size mugshot on thumbnail click (reuses the cached /api/mugshot image).
+window.showFace = function(formKey, caption){
+  $('#lbImg').src = '/api/mugshot?formKey='+encodeURIComponent(formKey);
+  $('#lbCap').textContent = caption||'';
+  $('#lightbox').classList.remove('hidden');
+};
+function hideFace(){ $('#lightbox').classList.add('hidden'); $('#lbImg').removeAttribute('src'); }
+$('#lightbox').onclick = hideFace;                 // click anywhere on the backdrop closes
+$('#lbClose').onclick = hideFace;
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('#lightbox').classList.contains('hidden')) hideFace(); });
 
 function tog(id,on){ on?state.selected.add(id):state.selected.delete(id); updateSelCount(); renderCoverage(); }
 window.tog = tog;
@@ -604,6 +734,7 @@ function selectedByRaceSex(){
   return m;
 }
 function renderCoverage(){
+  if(state.mode==='library'){ renderLibSummary(); return; }   // coverage pane is hidden in library mode
   const fem = $('#feminize') ? $('#feminize').checked : true;
   const sup = selectedByRaceSex();
   let tgt=0,result=0,skip=0,feminized=0,maleKept=0,usable=0,placed=0;
@@ -778,6 +909,86 @@ async function copyAudit(){
   setTimeout(()=>{ btn.textContent='Copy'; }, 2500);
 }
 $('#auditCopyBtn').onclick = copyAudit;
+
+// ---------- library mode ----------
+async function setMode(m){
+  if(state.mode===m) return;
+  state.mode = m;
+  $('#modeCreator').classList.toggle('on', m==='creator');
+  $('#modeLibrary').classList.toggle('on', m==='library');
+  document.querySelector('.app').classList.toggle('libmode', m==='library');
+  $('#creatorMid').classList.toggle('hidden', m!=='creator');
+  $('#creatorRight').classList.toggle('hidden', m!=='creator');
+  $('#libraryMid').classList.toggle('hidden', m!=='library');
+  $('#libraryRight').classList.toggle('hidden', m!=='library');
+  if(m==='library' && !state.blLoaded) await loadBlacklist();
+  await refreshFaces();     // re-fetch: creator=library-filtered pool, library=everything + saved whitelist
+  renderBlacklist();
+}
+
+async function loadBlacklist(){
+  try{ const r = await api('/api/library/blacklist'); state.blacklist = new Set(r.keys||[]); }
+  catch{ state.blacklist = new Set(); }
+  state.blLoaded = true;
+}
+function faceMetaFor(key){ const f = state.faces.find(x=>x.formKey===key); return f?{editorID:f.editorID,race:f.poolRace}:null; }
+
+window.togBlack = async function(key, editorID, race){
+  if(state.blacklist.has(key)) state.blacklist.delete(key);
+  else { state.blacklist.add(key); state.blMeta[key] = {editorID, race}; }
+  renderFaces(); renderBlacklist();
+  await saveBlacklist();
+};
+async function saveBlacklist(){
+  const npcs = [...state.blacklist].map(k=>{ const m = state.blMeta[k] || faceMetaFor(k) || {}; return {key:k, editorID:m.editorID, race:m.race}; });
+  const note=$('#blSaved'); if(note) note.textContent='saving…';
+  try{ await api('/api/library/blacklist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npcs})});
+    if(note){ note.textContent='saved ✓'; setTimeout(()=>{ if(note.textContent==='saved ✓') note.textContent=''; }, 2000); } }
+  catch(e){ if(note) note.textContent='save failed'; window.__err('blacklist save failed: '+(e&&e.message?e.message:e)); }
+}
+function renderBlacklist(){
+  const c=$('#blCount'); if(c) c.textContent = state.blacklist.size;
+  const list=$('#blList'); if(!list) return;
+  if(!state.blacklist.size){ list.innerHTML='<div class="muted">none yet</div>'; return; }
+  list.innerHTML = [...state.blacklist].map(k=>{
+    const m = state.blMeta[k] || faceMetaFor(k) || {};
+    return `<div class="src" style="padding:4px 8px">
+      <span class="name" title="${esc(k)}">${esc(m.editorID||'(unknown NPC)')} <span class="muted">${esc(m.race||'')}</span></span>
+      <button class="mini" title="remove from blacklist" onclick="togBlack('${jsq(k)}','${jsq(m.editorID||'')}','${jsq(m.race||'')}')">✕</button>
+    </div>`;
+  }).join('');
+}
+function renderLibSummary(){
+  const el=$('#libSummary'), btn=$('#saveLibBtn'); if(!el) return;
+  if(!state.sources.length){ el.innerHTML='<div class="muted">Add a source mod to curate.</div>'; if(btn) btn.disabled=true; return; }
+  const bySrc={};
+  for(const f of state.faces) if(state.selected.has(f.id)) bySrc[f.source]=(bySrc[f.source]||0)+1;
+  el.innerHTML = state.sources.map(s=>{
+    const n = bySrc[s.plugin]||0;
+    const total = state.faces.filter(f=>f.source===s.plugin).length;
+    const saved = state.wl[s.plugin] ? ' <span class="muted">· has saved whitelist</span>' : '';
+    return `<div class="stat"><span title="${esc(s.plugin)}">${esc(s.plugin.replace(/\.esp$/i,''))}${saved}</span><b>${n} / ${total}</b></div>`;
+  }).join('');
+  if(btn) btn.disabled=false;
+}
+async function saveLibrary(){
+  if(!state.sources.length) return;
+  const btn=$('#saveLibBtn'), out=$('#saveLibOut');
+  const empties = state.sources.filter(s=>!state.faces.some(f=>f.source===s.plugin && state.selected.has(f.id)));
+  if(empties.length && !confirm('These sources have NO faces ticked and will be FULLY BLOCKED in Mod Creator Mode:\n\n'+empties.map(s=>s.plugin).join('\n')+'\n\nSave anyway?')) return;
+  btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> saving…</div>';
+  const results=[];
+  for(const s of state.sources){
+    const faces = state.faces.filter(f=>f.source===s.plugin && state.selected.has(f.id))
+      .map(f=>({key:f.formKey, editorID:f.editorID, race:f.poolRace}));
+    try{ const r = await api('/api/library/mod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin:s.plugin, faces})});
+      state.wl[s.plugin] = new Set(faces.map(f=>f.key));
+      results.push(`✔ ${s.plugin}: ${r.count} face${r.count===1?'':'s'} whitelisted`);
+    }catch(e){ results.push(`✘ ${s.plugin}: ${e&&e.message?e.message:e}`); }
+  }
+  out.innerHTML = `<pre class="log" style="margin-top:6px">${esc(results.join('\n'))}</pre>`;
+  btn.disabled=false; renderLibSummary();
+}
 
 // ---------- utils ----------
 function esc(s){ return (''+s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
