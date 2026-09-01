@@ -3,6 +3,7 @@ using Mutagen.Bethesda.Skyrim;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Order;
 using Mutagen.Bethesda.Plugins.Binary.Parameters;
+using Mutagen.Bethesda.Plugins.Records;
 using YamlDotNet.Serialization;
 using System.Text.RegularExpressions;
 
@@ -115,7 +116,9 @@ static class Generate
         var pool = new Dictionary<string, List<Face>>(StringComparer.OrdinalIgnoreCase); // race -> faces
         var unpackFolders = new List<string>();  // only --standalone sources get their assets baked in
         var hdptModelByKey = new Dictionary<FormKey, (string folder, string rel)>(); // source HDPT -> its mesh
-        var srcHdpt = new Dictionary<FormKey, (IHeadPartGetter h, string folder)>();  // disable-source HDPT (indexed, copied on demand)
+        // disable-source records a transplanted face can reference (HDPT + the TXST/CLFM/FLST they point
+        // to) — indexed cheaply; only the ones actually reached get deep-copied, post-assignment.
+        var srcRec = new Dictionary<FormKey, (IMajorRecordGetter rec, string folder)>();
         var assets = new Dictionary<string, SourceAssets>(StringComparer.OrdinalIgnoreCase); // folder -> loose+BSA resolver
         var srcModes = new List<(string plugin, string mode, string why)>();
 
@@ -134,10 +137,14 @@ static class Generate
             if (disable)
             {
                 if (unpack) unpackFolders.Add(folder);
-                // INDEX every source HDPT (cheap — just references); we deep-copy ONLY the ones an assigned
-                // face actually wears (+ their ExtraParts), post-assignment. Copying them all here bloated
-                // the ESP with every head part the source shipped for NPCs we never touch.
-                foreach (var h in sm.HeadParts) srcHdpt[h.FormKey] = (h, folder);
+                // INDEX the source's own head-related records (cheap — just references). We deep-copy ONLY
+                // the closure an assigned face actually reaches, post-assignment — not every record the
+                // source shipped. Indexing HDPT + the TXST/CLFM/FLST they reference lets the copy fully
+                // DETACH from this esp (so it can truly be disabled, not left as a hidden master).
+                foreach (var h in sm.HeadParts) srcRec[h.FormKey] = (h, folder);
+                foreach (var t in sm.TextureSets) srcRec[t.FormKey] = (t, folder);
+                foreach (var c in sm.Colors) srcRec[c.FormKey] = (c, folder);
+                foreach (var fl in sm.FormLists) srcRec[fl.FormKey] = (fl, folder);
             }
             foreach (var n in sm.Npcs)
             {
@@ -162,7 +169,6 @@ static class Generate
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
         var missingFaceGen = new List<string>();
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var usedHdpt = new HashSet<FormKey>(); // source HDPT actually worn by an assigned face
 
         // Optional cross-mod texture baking: resolve textures a face references from ANY enabled mod
         // (not just the source's own folder), so shared brow/eye packs get baked and the output is
@@ -202,11 +208,9 @@ static class Generate
             var s = face.Npc;
             npc.Race.SetTo(s.Race.FormKey);           // adopt source race (custom breeds for khajiit; no-op otherwise)
             npc.HeadParts.Clear();
-            foreach (var hp in s.HeadParts)
-            {
-                npc.HeadParts.Add(hp);                // link to the ORIGINAL source FormKey; for a disable
-                if (face.Disable) usedHdpt.Add(hp.FormKey);  // face it's remapped to our copy after assignment
-            }
+            // Link to the ORIGINAL source FormKey; for a disable face the deferred deep-copy below copies
+            // the reached records and RemapLinks redirects these to our copies. Keep faces stay as-is.
+            foreach (var hp in s.HeadParts) npc.HeadParts.Add(hp);
             npc.TintLayers.Clear();
             foreach (var x in s.TintLayers) npc.TintLayers.Add(x.DeepCopy());
             npc.HairColor.SetTo(s.HairColor.FormKey);
@@ -349,26 +353,42 @@ static class Generate
         // Base-master targets are fully read now (override loop + Boost done) — release those handles.
         if (loBase is not null) { LoadOrderScan.DisposeLoadOrder(loBase); loBase = null; }
 
-        // Deep-copy ONLY the disable-source HDPT records an assigned face actually wears, plus the head
-        // parts they reference via ExtraParts (transitive — e.g. a hair's separate hairline part). This is
-        // the fix for the record bloat: previously EVERY head part in each source was copied, so an ESP for
-        // ~90 targets carried thousands of records for NPCs never touched. Then remap all links (NPC/clone
-        // head-part links + the copied records' internal ExtraParts links) from the source key to our copy.
-        var hdptClosure = new HashSet<FormKey>();
-        var hq = new Queue<FormKey>(usedHdpt);
-        while (hq.Count > 0)
+        // Deep-copy ONLY the disable-source records a transplanted face actually reaches — the worn head
+        // parts AND the TXST/CLFM/FLST/sub-HDPT they reference (transitive closure) — NOT every record the
+        // source shipped. Two fixes in one: (a) the record bloat (was: copy every source head part), and
+        // (b) DETACHMENT — a copied HDPT points at the source's own TextureSet, so without copying those the
+        // output silently kept the source as a MASTER (its esp couldn't actually be disabled). Seed from
+        // every in-source link still present in the output, BFS the closure, copy, then remap all links.
+        var toCopy = new HashSet<FormKey>();
+        var q = new Queue<FormKey>();
+        foreach (var rec in outMod.EnumerateMajorRecords())
+            foreach (var l in rec.EnumerateFormLinks())
+                if (!l.FormKey.IsNull && srcRec.ContainsKey(l.FormKey)) q.Enqueue(l.FormKey);
+        while (q.Count > 0)
         {
-            var fk = hq.Dequeue();
-            if (!hdptClosure.Add(fk) || !srcHdpt.TryGetValue(fk, out var e)) continue;   // vanilla/keep HDPT: no recurse
-            foreach (var ep in e.h.ExtraParts) if (!ep.FormKey.IsNull) hq.Enqueue(ep.FormKey);
+            var fk = q.Dequeue();
+            if (!toCopy.Add(fk) || !srcRec.TryGetValue(fk, out var e)) continue;
+            foreach (var l in e.rec.EnumerateFormLinks())
+                if (!l.FormKey.IsNull && srcRec.ContainsKey(l.FormKey)) q.Enqueue(l.FormKey);
         }
-        foreach (var fk in hdptClosure)
+        void AddCopy(IMajorRecord dup)
         {
-            if (!srcHdpt.TryGetValue(fk, out var e)) continue;   // not a disable-source HDPT — leave as-is
+            switch (dup)
+            {
+                case HeadPart h: outMod.HeadParts.Add(h); break;
+                case TextureSet t: outMod.TextureSets.Add(t); break;
+                case ColorRecord c: outMod.Colors.Add(c); break;
+                case FormList f: outMod.FormLists.Add(f); break;
+            }
+        }
+        foreach (var fk in toCopy)
+        {
+            var e = srcRec[fk];
             var nfk = outMod.GetNextFormKey();
-            outMod.HeadParts.Add((HeadPart)e.h.Duplicate(nfk));
+            var dup = e.rec.Duplicate(nfk);
+            AddCopy(dup);
             remap[fk] = nfk;
-            if (e.h.Model?.File.ToString() is { Length: > 0 } mf) hdptModelByKey[fk] = (e.folder, mf);
+            if (dup is IHeadPartGetter hp && hp.Model?.File.ToString() is { Length: > 0 } mf) hdptModelByKey[fk] = (e.folder, mf);
         }
         outMod.RemapLinks(remap);
 
@@ -512,28 +532,59 @@ static class Generate
         List<string> masters;
         using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
             masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
-        var espOff = srcModes.Where(m => m.mode is "disable" or "standalone").Select(m => m.plugin).ToList();
-        File.WriteAllText(Path.Combine(outFolder, "README.txt"),
-            $"{outName} — generated by FaceDiversityApp (personal use only; do not redistribute)\n\n" +
-            $"Category: {category}.  {totalAssigned} faces ({femCount} feminized males), {totalSkipped} skipped.\n" +
-            $"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n\n" +
-            $"KEEP ENABLED — required masters (records + assets; leave the whole mod on):\n" +
-                string.Join("\n", masters.Select(m => "  - " + m)) + "\n\n" +
-            $"DISABLE THESE ESPs — self-contained: each face's records, FaceGen, and the exact hairs/eyes/\n" +
-            $"textures it uses are baked into THIS mod. Turn these .esp off; you can also remove the mods:\n" +
-                (espOff.Count > 0 ? string.Join("\n", espOff.Select(p => "  - " + p)) : "  (none)") + "\n\n" +
-            $"Per-race:\n" + string.Join("\n", report.OrderBy(k => k.Key).Select(kv => $"  {kv.Key}: assigned {kv.Value.assigned}, skipped {kv.Value.skipped}")) + "\n" +
-            (boost && boostAdded > 0
-                ? $"\nLEVELED-LIST BOOST: +{boostAdded} extra NPCs injected into vanilla leveled lists via SkyPatcher\n" +
-                  $"(SKSE/Plugins/SkyPatcher/leveledList/{Path.GetFileNameWithoutExtension(outName)}.ini).\n" +
-                  $"REQUIRES SkyPatcher installed and enabled.\n"
-                : "") +
-            (npcIni is not null
-                ? $"\nSKYPATCHER NPC CONFIG (SKSE/Plugins/SkyPatcher/npc/{Path.GetFileNameWithoutExtension(outName)}_npc.ini) — REQUIRES SkyPatcher enabled:\n" +
-                  (spTagged > 0 ? $"  · SexPlague: {spTagged} feminized males tagged ({spSummary}) — REQUIRES SexPlagueFactions.esp.\n" : "") +
-                  (femNamesOn ? $"  · Feminine names: {renamed} feminized males given a feminine display name.\n" : "")
-                : "") +
-            (missingFaceGen.Count > 0 ? $"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n" : ""));
+        // Classify sources for the manifest. After the deep-copy above, a disable/standalone source is no
+        // longer a master (its records are copied in), so it can genuinely be turned off. Reconcile against
+        // the ACTUAL master list: anything still mastered (a referenced record we couldn't copy out) must
+        // stay enabled and is never listed as disable-able — this is what prevents the old contradiction of
+        // the same mod appearing under both KEEP ENABLED and DISABLE.
+        var masterSet = new HashSet<string>(masters, StringComparer.OrdinalIgnoreCase);
+        var espDisable = srcModes.Where(m => m.mode == "disable").Select(m => m.plugin).Distinct().ToList();
+        var espStandalone = srcModes.Where(m => m.mode == "standalone").Select(m => m.plugin).Distinct().ToList();
+        var stuck = espDisable.Concat(espStandalone).Where(masterSet.Contains).Distinct().ToList();
+        var offKeepMod = espDisable.Where(p => !masterSet.Contains(p)).ToList();       // esp off, mod stays (assets)
+        var offRemoveMod = espStandalone.Where(p => !masterSet.Contains(p)).ToList();   // esp off + assets baked -> gone
+        string Bullets(IEnumerable<string> xs) => string.Join("\n", xs.Select(p => "  - " + p));
+
+        var rd = new System.Text.StringBuilder();
+        rd.Append($"{outName} — generated by FaceDiversityApp (personal use only; do not redistribute)\n\n");
+        rd.Append($"Category: {category}.  {totalAssigned} faces ({femCount} feminized males), {totalSkipped} skipped.\n");
+        rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
+        if (bakeTextures)
+            rd.Append($"Textures: BAKED — {bakedCrossMod} cross-mod face textures (brows/eyes/hair from other packs)\n"
+                    + "  are copied into THIS mod; only shared skin/body is left to its overhaul.\n");
+        else
+            rd.Append("Textures: NOT baked — a face's brows/eyes/hair may load from OTHER mods (texture packs),\n"
+                    + "  which this mod does NOT contain. Keep those packs enabled, or regenerate with 'Bake\n"
+                    + "  textures' for a self-contained result. Run 'Verify assets' to list exactly which mods.\n");
+        rd.Append("\n");
+        rd.Append("KEEP ENABLED — required masters (leave these ON):\n" + Bullets(masters) + "\n");
+        if (stuck.Count > 0)
+            rd.Append("  NOTE — these harvested sources are STILL referenced by this mod (a record it uses lives\n"
+                    + "  in them and could not be copied out), so they must stay ENABLED too:\n" + Bullets(stuck) + "\n");
+        rd.Append("\n");
+        if (offRemoveMod.Count > 0)
+            rd.Append("SAFE TO REMOVE — records AND assets are baked in (standalone); the mod can be deleted:\n"
+                    + Bullets(offRemoveMod) + "\n\n");
+        if (offKeepMod.Count > 0)
+            rd.Append("DISABLE THE .ESP, KEEP THE MOD — the face records are self-contained here, but the mod\n"
+                    + "still supplies the hair/skin meshes+textures: turn its .esp OFF, leave the mod installed\n"
+                    + "(loose files load with the esp off; a packed BSA needs force-loading in MO2's Archives tab):\n"
+                    + Bullets(offKeepMod) + "\n\n");
+        if (offRemoveMod.Count == 0 && offKeepMod.Count == 0 && stuck.Count == 0)
+            rd.Append("(No harvested sources to disable — all inputs are kept as masters.)\n\n");
+        rd.Append("Per-race:\n" + string.Join("\n", report.OrderBy(k => k.Key).Select(kv => $"  {kv.Key}: assigned {kv.Value.assigned}, skipped {kv.Value.skipped}")) + "\n");
+        if (boost && boostAdded > 0)
+            rd.Append($"\nLEVELED-LIST BOOST: +{boostAdded} extra NPCs injected into vanilla leveled lists via SkyPatcher\n"
+                    + $"(SKSE/Plugins/SkyPatcher/leveledList/{Path.GetFileNameWithoutExtension(outName)}.ini).\nREQUIRES SkyPatcher installed and enabled.\n");
+        if (npcIni is not null)
+        {
+            rd.Append($"\nSKYPATCHER NPC CONFIG (SKSE/Plugins/SkyPatcher/npc/{Path.GetFileNameWithoutExtension(outName)}_npc.ini) — REQUIRES SkyPatcher enabled:\n");
+            if (spTagged > 0) rd.Append($"  - SexPlague: {spTagged} feminized males tagged ({spSummary}) — REQUIRES SexPlagueFactions.esp.\n");
+            if (femNamesOn) rd.Append($"  - Feminine names: {renamed} feminized males given a feminine display name.\n");
+        }
+        if (missingFaceGen.Count > 0)
+            rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
+        File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
         Console.WriteLine($"Wrote {esp}");
         return 0;
     }
