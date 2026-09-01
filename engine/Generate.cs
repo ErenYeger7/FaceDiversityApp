@@ -115,6 +115,7 @@ static class Generate
         var pool = new Dictionary<string, List<Face>>(StringComparer.OrdinalIgnoreCase); // race -> faces
         var unpackFolders = new List<string>();  // only --standalone sources get their assets baked in
         var hdptModelByKey = new Dictionary<FormKey, (string folder, string rel)>(); // source HDPT -> its mesh
+        var srcHdpt = new Dictionary<FormKey, (IHeadPartGetter h, string folder)>();  // disable-source HDPT (indexed, copied on demand)
         var assets = new Dictionary<string, SourceAssets>(StringComparer.OrdinalIgnoreCase); // folder -> loose+BSA resolver
         var srcModes = new List<(string plugin, string mode, string why)>();
 
@@ -133,13 +134,10 @@ static class Generate
             if (disable)
             {
                 if (unpack) unpackFolders.Add(folder);
-                foreach (var h in sm.HeadParts)   // deep-copy the source's HDPT records so links resolve with its esp off
-                {
-                    var fk = outMod.GetNextFormKey();
-                    outMod.HeadParts.Add((HeadPart)h.Duplicate(fk));
-                    remap[h.FormKey] = fk;
-                    if (h.Model?.File.ToString() is { Length: > 0 } mf) hdptModelByKey[h.FormKey] = (folder, mf);
-                }
+                // INDEX every source HDPT (cheap — just references); we deep-copy ONLY the ones an assigned
+                // face actually wears (+ their ExtraParts), post-assignment. Copying them all here bloated
+                // the ESP with every head part the source shipped for NPCs we never touch.
+                foreach (var h in sm.HeadParts) srcHdpt[h.FormKey] = (h, folder);
             }
             foreach (var n in sm.Npcs)
             {
@@ -156,7 +154,7 @@ static class Generate
                 l.Add(new Face(n, folder, disable, Fem(n)));
             }
         }
-        outMod.RemapLinks(remap);
+        // (RemapLinks deferred: we copy only the WORN source HDPTs after assignment, then remap.)
 
         var cursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var report = new Dictionary<string, (int assigned, int skipped, int faces)>(StringComparer.OrdinalIgnoreCase);
@@ -206,9 +204,8 @@ static class Generate
             npc.HeadParts.Clear();
             foreach (var hp in s.HeadParts)
             {
-                if (face.Disable && remap.TryGetValue(hp.FormKey, out var nf))
-                { npc.HeadParts.Add((IFormLinkGetter<IHeadPartGetter>)new FormLink<IHeadPartGetter>(nf)); usedHdpt.Add(hp.FormKey); }
-                else npc.HeadParts.Add(hp);           // keep: reference source as-is
+                npc.HeadParts.Add(hp);                // link to the ORIGINAL source FormKey; for a disable
+                if (face.Disable) usedHdpt.Add(hp.FormKey);  // face it's remapped to our copy after assignment
             }
             npc.TintLayers.Clear();
             foreach (var x in s.TintLayers) npc.TintLayers.Add(x.DeepCopy());
@@ -221,12 +218,16 @@ static class Generate
         // Map a male voice to a female one: a direct voice_map entry wins; otherwise the target's race
         // fallback pool (handles MaleUnique*/custom voices). Candidates are validated against the load
         // order's VTCK; the pick is deterministic per NPC (hash of FormID) so it's stable on regenerate.
+        // A direct entry only wins if AT LEAST ONE of its female voices exists here — otherwise fall
+        // through to the race pool, so a direct mapping whose target voice is absent doesn't strand the
+        // NPC as "unmapped" when a race-appropriate voice would have served.
         bool TryFemVoice(FormKey maleVoice, string raceName, uint id, out FormKey fem)
         {
             fem = default;
             var ov = voiceName.GetValueOrDefault(maleVoice, "");
-            var candidates = voiceMap.Direct.TryGetValue(ov, out var dc) ? dc
-                           : voiceMap.Fallback.TryGetValue(raceName, out var fc) ? fc : null;
+            List<string>? candidates = null;
+            if (voiceMap.Direct.TryGetValue(ov, out var dc) && dc.Any(voiceByName.ContainsKey)) candidates = dc;
+            else if (voiceMap.Fallback.TryGetValue(raceName, out var fc)) candidates = fc;
             if (candidates is null) return false;
             var valid = candidates.Where(voiceByName.ContainsKey).ToList();
             if (valid.Count == 0) return false;
@@ -348,14 +349,36 @@ static class Generate
         // Base-master targets are fully read now (override loop + Boost done) — release those handles.
         if (loBase is not null) { LoadOrderScan.DisposeLoadOrder(loBase); loBase = null; }
 
-        // Bake only the HDPT meshes actually worn (+ their textures) — not every hair the source shipped.
-        foreach (var key in usedHdpt)
-            if (hdptModelByKey.TryGetValue(key, out var hm))
-            {
-                ExtractAsset(assets[hm.folder], hm.rel);
-                var nif = assets[hm.folder].Get(hm.rel);
-                if (nif != null) foreach (var tex in DdsPathsInNif(nif)) ExtractAsset(assets[hm.folder], tex);
-            }
+        // Deep-copy ONLY the disable-source HDPT records an assigned face actually wears, plus the head
+        // parts they reference via ExtraParts (transitive — e.g. a hair's separate hairline part). This is
+        // the fix for the record bloat: previously EVERY head part in each source was copied, so an ESP for
+        // ~90 targets carried thousands of records for NPCs never touched. Then remap all links (NPC/clone
+        // head-part links + the copied records' internal ExtraParts links) from the source key to our copy.
+        var hdptClosure = new HashSet<FormKey>();
+        var hq = new Queue<FormKey>(usedHdpt);
+        while (hq.Count > 0)
+        {
+            var fk = hq.Dequeue();
+            if (!hdptClosure.Add(fk) || !srcHdpt.TryGetValue(fk, out var e)) continue;   // vanilla/keep HDPT: no recurse
+            foreach (var ep in e.h.ExtraParts) if (!ep.FormKey.IsNull) hq.Enqueue(ep.FormKey);
+        }
+        foreach (var fk in hdptClosure)
+        {
+            if (!srcHdpt.TryGetValue(fk, out var e)) continue;   // not a disable-source HDPT — leave as-is
+            var nfk = outMod.GetNextFormKey();
+            outMod.HeadParts.Add((HeadPart)e.h.Duplicate(nfk));
+            remap[fk] = nfk;
+            if (e.h.Model?.File.ToString() is { Length: > 0 } mf) hdptModelByKey[fk] = (e.folder, mf);
+        }
+        outMod.RemapLinks(remap);
+
+        // Bake only the HDPT meshes actually shipped (+ their textures) — not every hair the source shipped.
+        foreach (var hm in hdptModelByKey.Values.ToList())
+        {
+            ExtractAsset(assets[hm.folder], hm.rel);
+            var nif = assets[hm.folder].Get(hm.rel);
+            if (nif != null) foreach (var tex in DdsPathsInNif(nif)) ExtractAsset(assets[hm.folder], tex);
+        }
 
         // Only --standalone sources bake their assets in (fully removable). Plain --disable leaves assets
         // in the still-enabled source MOD (esp off, mod on): loose files auto-load; a BSA needs force-loading
