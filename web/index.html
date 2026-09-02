@@ -354,7 +354,8 @@ async function api(p,o){
   catch(e){ throw new Error('non-JSON from '+p+': '+txt.slice(0,300)); }
 }
 const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1,
-  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{}, raceAs:{}, compat:{} };
+  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{}, raceAs:{}, compat:{},
+  mugshotMods:[], mugshotAliases:{}, msVer:0 };
 
 // ---------- boot ----------
 (async function boot(){
@@ -380,13 +381,14 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
   $('#gameDataInput').value = winPath(state.config.gameData);
   $('#botPresetsInput').value = winPath(state.config.botPresets);
   $('#mugshotRootInput').value = winPath(state.config.mugshotRoot||'');
+  state.mugshotAliases = Object.assign({}, state.config.mugshotAliases||{});
   $('#profilesPath').textContent = state.config.profiles ? ('profiles (auto): '+winPath(state.config.profiles)) : '';
   $('#settingsPathNote').textContent = state.config.settingsPath ? ('saved to: '+winPath(state.config.settingsPath)) : '';
   $('#saveSettingsBtn').onclick = saveSettings;
 
   // mode toggle + library controls
-  $('#modeCreator').onclick = ()=>setMode('creator');
-  $('#modeLibrary').onclick = ()=>setMode('library');
+  $('#modeCreator').onclick = ()=>setAppMode('creator');
+  $('#modeLibrary').onclick = ()=>setAppMode('library');
   $('#saveLibBtn').onclick = saveLibrary;
 
   // MO2 environment controls
@@ -448,6 +450,8 @@ async function saveSettings(){
     note.textContent = '✔ saved ('+(r.gameVersion||'')+')';
     state.config.game = body.game; state.config.gameVersion = r.gameVersion;
     state.config.mugshotRoot = (r.mugshotRoot!=null? r.mugshotRoot : body.mugshotRoot);
+    state.msVer++; state.mugshotMods = [];      // pack root may have changed — re-fetch folders + bust thumbnail cache
+    if(state.config.mugshotRoot){ try{ state.mugshotMods = await api('/api/mugshot-mods'); }catch{} }
     if(state.mode==='library') renderFaces();   // thumbnails follow the new pack root
     const gp=$('#gamePath'); if(gp) gp.textContent = winPath(body.game);
     // the profiles dir is auto-derived from mods server-side — repopulate the profile list + show the path
@@ -575,7 +579,8 @@ function renderModPick(){
 async function addSource(path, plugin){
   if(state.sources.some(s=>s.path===path)) return;
   const cls = await api('/api/classify?source='+encodeURIComponent(path));
-  state.sources.push({ path, plugin, mode:cls.mode, femaleNpcs:cls.femaleNpcs, why:cls.why, ownHdpt:cls.ownHdpt||0,
+  const modFolder = path.split(/[\\/]/).slice(-2,-1)[0] || '';   // mod-manager folder — matched to a mugshot pack folder
+  state.sources.push({ path, plugin, sourceMod:modFolder, mode:cls.mode, femaleNpcs:cls.femaleNpcs, why:cls.why, ownHdpt:cls.ownHdpt||0,
     usesCustomRace:!!cls.usesCustomRace, shipsRaceTextures:!!cls.shipsRaceTextures, hasBsa:!!cls.hasBsa });
   renderSources(); renderModPick(); await refreshFaces();
 }
@@ -610,11 +615,29 @@ function renderSources(){
         ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
       </select>
       <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
-    </div>${(()=>{const su=summaryText(summaryForPlugin(s.plugin)); return su?`<div class="lsum" title="${esc(su.title)}">📚 library coverage — ${esc(su.text)}</div>`:'';})()}${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
+    </div>${mugshotRow(s)}${(()=>{const su=summaryText(summaryForPlugin(s.plugin)); return su?`<div class="lsum" title="${esc(su.title)}">📚 library coverage — ${esc(su.text)}</div>`:'';})()}${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
 }
 // A keep source is safe to switch to disable ONLY if the keep reason is the soft one (its BSA). Custom
 // races and shipped skin textures are hard keeps — disabling would break the face or cause a neck seam.
 function canDisable(s){ return s.mode==='keep' && !s.usesCustomRace && !s.shipsRaceTextures && s.hasBsa; }
+
+// Library mode: per-source manual mugshot-folder override (when the auto name-match picks wrong / nothing).
+function mugshotRow(s){
+  if(state.mode!=='library' || !state.config.mugshotRoot || !state.mugshotMods.length) return '';
+  const cur = state.mugshotAliases[s.sourceMod] || '';
+  return `<div class="lsum" style="color:#9aa4b2;white-space:normal;margin:-2px 0 6px 6px">🖼 mugshots:
+    <select onchange="setMugshotAlias('${jsq(s.sourceMod)}',this.value)" title="which mugshot-pack folder to use for this mod (auto matches the pack folder to the mod name)">
+      <option value="">auto — “${esc(s.sourceMod)}”</option>
+      ${state.mugshotMods.map(m=>`<option value="${esc(m)}" ${cur===m?'selected':''}>${esc(m)}</option>`).join('')}
+    </select></div>`;
+}
+window.setMugshotAlias = async function(sourceMod, folder){
+  if(folder) state.mugshotAliases[sourceMod]=folder; else delete state.mugshotAliases[sourceMod];
+  state.msVer++;              // change the thumbnail URLs so the browser re-fetches (they're cacheable)
+  renderFaces(); renderSources();
+  try{ await api('/api/mugshot-alias',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mod:sourceMod, folder:folder||''})}); }
+  catch(e){ window.__err('mugshot alias save failed: '+(e&&e.message?e.message:e)); }
+};
 
 // ---------- faces ----------
 // A face is "usable" for the current category if its race is one the category actually has targets in,
@@ -724,10 +747,13 @@ function renderFaces(){
 }
 
 // thumbnail: <img> hitting /api/mugshot; falls back to a placeholder card on 404 / no pack configured.
+function mugUrl(formKey, mod){
+  return '/api/mugshot?formKey='+encodeURIComponent(formKey)+'&mod='+encodeURIComponent(mod||'')+'&v='+(state.msVer||0);
+}
 function thumbHtml(f){
   if(!state.config || !state.config.mugshotRoot) return `<div class="thumb ph">no pack</div>`;
   const cap = (f.editorID||'(no EditorID)')+' · '+(f.poolRace||'')+' · '+f.source;
-  return `<img class="thumb" loading="lazy" alt="" src="/api/mugshot?formKey=${encodeURIComponent(f.formKey)}" onerror="thumbFail(this)" onclick="showFace('${jsq(f.formKey)}','${jsq(cap)}')">`;
+  return `<img class="thumb" loading="lazy" alt="" src="${mugUrl(f.formKey,f.sourceMod)}" onerror="thumbFail(this)" onclick="showFace('${jsq(f.formKey)}','${jsq(cap)}','${jsq(f.sourceMod||'')}')">`;
 }
 window.thumbFail = function(img){ img.onerror=null; const d=document.createElement('div'); d.className='thumb ph'; d.textContent='no img'; img.replaceWith(d); };
 
@@ -746,8 +772,8 @@ window.setRaceAs = function(id, race){
 };
 
 // Lightbox: full-size mugshot on thumbnail click (reuses the cached /api/mugshot image).
-window.showFace = function(formKey, caption){
-  $('#lbImg').src = '/api/mugshot?formKey='+encodeURIComponent(formKey);
+window.showFace = function(formKey, caption, mod){
+  $('#lbImg').src = mugUrl(formKey, mod);
   $('#lbCap').textContent = caption||'';
   $('#lightbox').classList.remove('hidden');
 };
@@ -961,7 +987,7 @@ async function copyAudit(){
 $('#auditCopyBtn').onclick = copyAudit;
 
 // ---------- library mode ----------
-async function setMode(m){
+async function setAppMode(m){
   if(state.mode===m) return;
   state.mode = m;
   $('#modeCreator').classList.toggle('on', m==='creator');
@@ -972,6 +998,9 @@ async function setMode(m){
   $('#libraryMid').classList.toggle('hidden', m!=='library');
   $('#libraryRight').classList.toggle('hidden', m!=='library');
   if(m==='library' && !state.blLoaded) await loadBlacklist();
+  if(m==='library' && state.config.mugshotRoot && !state.mugshotMods.length){
+    try{ state.mugshotMods = await api('/api/mugshot-mods'); }catch{ state.mugshotMods = []; }
+  }
   await refreshFaces();     // re-fetch: creator=library-filtered pool, library=everything + saved whitelist
   renderBlacklist();
 }

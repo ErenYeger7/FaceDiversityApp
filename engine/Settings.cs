@@ -35,6 +35,9 @@ class AppSettings
     public string Profile { get; set; } = "";     // active MO2 profile name
     public string BotPresets { get; set; } = "";  // Bodies of Tamriel BodySlide SliderPresets dir
     public string MugshotRoot { get; set; } = ""; // Library Mode: root of a local EasyNPC/NPC-PC-2 mugshot pack
+    // Manual override: source-mod folder name -> the pack's appearance-mod folder to use for it (when the
+    // auto name-match fails). Per-PC (folder names differ per modlist), so it lives in settings.json.
+    public Dictionary<string, string> MugshotAliases { get; set; } = new();
 }
 
 static class Settings

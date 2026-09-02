@@ -13,7 +13,7 @@ static class Faces
 {
     public record FaceInfo(
         string Id, string Source, string FormKey, string? EditorID,
-        string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex);
+        string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod);
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display
@@ -37,6 +37,8 @@ static class Faces
         var list = new List<FaceInfo>();
         foreach (var sp in sources)
         {
+            // the mod-manager folder the source plugin lives in — matched to a mugshot pack's appearance-mod folder
+            var sourceMod = Path.GetFileName(Path.GetDirectoryName(Path.GetFullPath(sp))) ?? "";
             ISkyrimModDisposableGetter sm;
             try { sm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(sp), GameCfg.Release); }
             catch { continue; }
@@ -51,7 +53,7 @@ static class Faces
                     list.Add(new FaceInfo(
                         FaceId(sp, n.FormKey), Path.GetFileName(sp), n.FormKey.ToString(), n.EditorID,
                         poolRace, RaceOf(n.Race.FormKey), n.Voice.FormKey.IsNull ? null : n.Voice.FormKey.ToString(),
-                        custom, Fem(n) ? "F" : "M"));
+                        custom, Fem(n) ? "F" : "M", sourceMod));
                 }
         }
         return list;

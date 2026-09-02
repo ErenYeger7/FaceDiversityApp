@@ -17,6 +17,7 @@ static class Serve
     // live paths (from config/settings.json, else the built-in SME fallback; all overridable via flags)
     static string Game = "", Mods = "", Config = "", VoiceMap = "", WebRoot = "", OutDir = "",
                   Profiles = "", Profile = "", BotPresets = "", GameData = "", MugshotRoot = "";
+    static Dictionary<string, string> MugshotAliases = new(StringComparer.OrdinalIgnoreCase);
 
     // built-in fallbacks so the app still runs on this PC even with no settings.json
     const string DefGame = "C:/Modlists/SME/Stock Game/Data/Skyrim.esm";
@@ -57,6 +58,7 @@ static class Serve
         // split where the ESM you point at is a cleaned-masters copy separate from the BSA install.
         GameData = Def(s.GameData, Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game);
         MugshotRoot = Norm(Def(s.MugshotRoot, ""));
+        MugshotAliases = new(s.MugshotAliases ?? new(), StringComparer.OrdinalIgnoreCase);
         Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
         Config = Path.Combine(home, "config", "categories.yaml");
         VoiceMap = Path.Combine(home, "config", "voice_map.yaml");
@@ -166,10 +168,14 @@ static class Serve
                 }
                 case "/api/mugshot":
                 {
-                    var p = Mugshots.Resolve(MugshotRoot, q["formKey"]);
+                    var mod = q["mod"] ?? "";
+                    MugshotAliases.TryGetValue(mod, out var aliasFolder);
+                    var p = Mugshots.Resolve(MugshotRoot, q["formKey"], mod, aliasFolder);
                     if (p is null || !File.Exists(p)) { Send(ctx, 404, "text/plain", Encoding.UTF8.GetBytes("no mugshot")); return; }
                     SendImage(ctx, p); return;
                 }
+                case "/api/mugshot-mods": Send(ctx, 200, "application/json", Json(Mugshots.AvailableMods(MugshotRoot))); return;
+                case "/api/mugshot-alias" when ctx.Request.HttpMethod == "POST": HandleMugshotAlias(ctx); return;
                 case "/api/demand":
                 {
                     var cat = q["category"] ?? "bandit";
@@ -234,7 +240,7 @@ static class Serve
         profiles = Profiles, profile = Profile, profileList = ListProfiles(),
         botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release),
         gameVersions = new[] { "SkyrimSE", "SkyrimVR" },
-        mugshotRoot = MugshotRoot, libraryRoot = Library.Root(),
+        mugshotRoot = MugshotRoot, libraryRoot = Library.Root(), mugshotAliases = MugshotAliases,
         settingsPath = Settings.FilePath,
         feminizeDefault = true,
         categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan) })
@@ -283,7 +289,7 @@ static class Serve
         {
             GameVersion = GameCfg.Canon(GameCfg.Release),
             Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets,
-            MugshotRoot = MugshotRoot
+            MugshotRoot = MugshotRoot, MugshotAliases = new(MugshotAliases)
         };
         Settings.Save();
         Send(ctx, 200, "application/json", Json(new
@@ -490,6 +496,23 @@ static class Serve
         catch (Exception e) { sw.WriteLine("EXCEPTION: " + e); code = 1; }
         finally { Console.SetOut(oldOut); Console.SetError(oldErr); }
         return (code, sw.ToString());
+    }
+
+    // ---- mugshots manual override ----
+    record MugshotAliasReq(string? Mod, string? Folder);
+    static void HandleMugshotAlias(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        MugshotAliasReq? req;
+        try { req = JsonSerializer.Deserialize<MugshotAliasReq>(body, J); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        if (req is null || string.IsNullOrWhiteSpace(req.Mod)) { Send(ctx, 400, "application/json", Json(new { error = "mod required" })); return; }
+        var mod = req.Mod.Trim();
+        if (string.IsNullOrWhiteSpace(req.Folder)) MugshotAliases.Remove(mod);   // blank => back to auto
+        else MugshotAliases[mod] = req.Folder.Trim();
+        Settings.Current.MugshotAliases = new(MugshotAliases);
+        Settings.Save();
+        Send(ctx, 200, "application/json", Json(new { ok = true, aliases = MugshotAliases }));
     }
 
     // ---- library ----
