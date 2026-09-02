@@ -18,6 +18,7 @@ static class Serve
     static string Game = "", Mods = "", Config = "", VoiceMap = "", WebRoot = "", OutDir = "",
                   Profiles = "", Profile = "", BotPresets = "", GameData = "", MugshotRoot = "";
     static Dictionary<string, string> MugshotAliases = new(StringComparer.OrdinalIgnoreCase);
+    static bool FaceFinderEnabled = false, FaceFinderCache = false;
 
     // built-in fallbacks so the app still runs on this PC even with no settings.json
     const string DefGame = "C:/Modlists/SME/Stock Game/Data/Skyrim.esm";
@@ -59,6 +60,7 @@ static class Serve
         GameData = Def(s.GameData, Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game);
         MugshotRoot = Norm(Def(s.MugshotRoot, ""));
         MugshotAliases = new(s.MugshotAliases ?? new(), StringComparer.OrdinalIgnoreCase);
+        FaceFinderEnabled = s.FaceFinderEnabled; FaceFinderCache = s.FaceFinderCache;
         Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData);
         Config = Path.Combine(home, "config", "categories.yaml");
         VoiceMap = Path.Combine(home, "config", "voice_map.yaml");
@@ -169,10 +171,27 @@ static class Serve
                 case "/api/mugshot":
                 {
                     var mod = q["mod"] ?? "";
+                    var fk = q["formKey"];
                     MugshotAliases.TryGetValue(mod, out var aliasFolder);
-                    var p = Mugshots.Resolve(MugshotRoot, q["formKey"], mod, aliasFolder);
-                    if (p is null || !File.Exists(p)) { Send(ctx, 404, "text/plain", Encoding.UTF8.GetBytes("no mugshot")); return; }
-                    SendImage(ctx, p); return;
+                    var p = Mugshots.Resolve(MugshotRoot, fk, mod, aliasFolder);   // 1. local pack (incl. cached)
+                    if (p is not null && File.Exists(p)) { SendImage(ctx, p); return; }
+                    if (FaceFinderEnabled && !string.IsNullOrWhiteSpace(fk))         // 2. FaceFinder online fallback
+                    {
+                        var got = FaceFinder.Fetch(fk, mod, aliasFolder);   // manual alias also steers the online match
+                        if (got is { } img)
+                        {
+                            if (FaceFinderCache && FaceFinder.CachePath(MugshotRoot, mod, fk!) is { } cachePath)
+                                try
+                                {
+                                    Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+                                    File.WriteAllBytes(cachePath, img.bytes);
+                                    Mugshots.AddToIndex(MugshotRoot, fk!, mod, cachePath);   // resolves locally next time
+                                }
+                                catch { /* cache is best-effort; still serve the bytes */ }
+                            SendBytes(ctx, img.bytes, img.contentType); return;
+                        }
+                    }
+                    Send(ctx, 404, "text/plain", Encoding.UTF8.GetBytes("no mugshot")); return;   // 3. placeholder
                 }
                 case "/api/mugshot-mods": Send(ctx, 200, "application/json", Json(Mugshots.AvailableMods(MugshotRoot))); return;
                 case "/api/mugshot-alias" when ctx.Request.HttpMethod == "POST": HandleMugshotAlias(ctx); return;
@@ -241,12 +260,14 @@ static class Serve
         botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release),
         gameVersions = new[] { "SkyrimSE", "SkyrimVR" },
         mugshotRoot = MugshotRoot, libraryRoot = Library.Root(), mugshotAliases = MugshotAliases,
+        faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache,
         settingsPath = Settings.FilePath,
         feminizeDefault = true,
         categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan) })
     };
 
-    record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData, string? MugshotRoot);
+    record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData, string? MugshotRoot,
+                       bool? FaceFinderEnabled, bool? FaceFinderCache);
 
     // Persist per-PC settings from the UI: update the live server config + config/settings.json + the
     // global game release. Only non-empty fields are applied (blank = keep current live value).
@@ -272,6 +293,8 @@ static class Serve
         // mugshot root is nullable-clearable: unlike the others, an empty string is a legitimate value
         // ("no pack configured"), so apply it whenever the field is PRESENT (non-null), blank included.
         if (req.MugshotRoot is not null) { MugshotRoot = req.MugshotRoot.Trim(); Mugshots.Invalidate(); }
+        if (req.FaceFinderEnabled is not null) FaceFinderEnabled = req.FaceFinderEnabled.Value;
+        if (req.FaceFinderCache is not null) FaceFinderCache = req.FaceFinderCache.Value;
         // base-game Data folder: explicit override wins; else if game changed, re-derive as its folder.
         if (!string.IsNullOrWhiteSpace(req.GameData)) GameData = req.GameData!.Trim();
         else if (gameChanged) GameData = Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game;
@@ -289,13 +312,15 @@ static class Serve
         {
             GameVersion = GameCfg.Canon(GameCfg.Release),
             Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets,
-            MugshotRoot = MugshotRoot, MugshotAliases = new(MugshotAliases)
+            MugshotRoot = MugshotRoot, MugshotAliases = new(MugshotAliases),
+            FaceFinderEnabled = FaceFinderEnabled, FaceFinderCache = FaceFinderCache
         };
         Settings.Save();
         Send(ctx, 200, "application/json", Json(new
         {
             ok = true, saved = Settings.FilePath, gameVersion = GameCfg.Canon(GameCfg.Release),
-            profiles = Profiles, profile = Profile, profileList, gameData = GameData, mugshotRoot = MugshotRoot
+            profiles = Profiles, profile = Profile, profileList, gameData = GameData, mugshotRoot = MugshotRoot,
+            faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache
         }));
     }
 
@@ -585,9 +610,16 @@ static class Serve
     // overriding the no-store default the JSON API uses.
     static void SendImage(HttpListenerContext ctx, string path)
     {
-        var body = File.ReadAllBytes(path);
+        var ct = Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".webp" => "image/webp", ".jpg" or ".jpeg" => "image/jpeg", _ => "image/png"
+        };
+        SendBytes(ctx, File.ReadAllBytes(path), ct);
+    }
+    static void SendBytes(HttpListenerContext ctx, byte[] body, string contentType)
+    {
         ctx.Response.StatusCode = 200;
-        ctx.Response.ContentType = "image/png";
+        ctx.Response.ContentType = contentType;
         ctx.Response.Headers["Cache-Control"] = "private, max-age=3600";
         ctx.Response.ContentLength64 = body.Length;
         ctx.Response.OutputStream.Write(body, 0, body.Length);

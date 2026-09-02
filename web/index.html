@@ -145,6 +145,14 @@ window.addEventListener('unhandledrejection',function(ev){
       <input type="text" id="botPresetsInput" placeholder="…\CalienteTools\Bodyslide\SliderPresets">
       <label class="fld">Mugshots pack folder <span class="muted">(Library Mode thumbnails — EasyNPC / NPC-PC-2 layout root; blank = names only)</span></label>
       <input type="text" id="mugshotRootInput" placeholder="…\mods\Some Mugshots Pack (root that holds the mod/master subfolders)">
+      <label class="row" style="margin-top:8px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="faceFinderEnabled">
+        <span>Use FaceFinder online for missing faces <span class="muted">— fetch previews from npcfacefinder.com when the local pack has none (outbound requests; opt-in)</span></span>
+      </label>
+      <label class="row" style="margin-top:6px;margin-left:22px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="faceFinderCache">
+        <span>Cache fetched images into the mugshots folder <span class="muted">— saved under “FaceFinder Cache\…” so they load locally (and offline) next time; needs a mugshots folder set</span></span>
+      </label>
       <div class="row" style="margin-top:8px;gap:8px;align-items:center">
         <button class="mini" id="saveSettingsBtn">Save settings</button>
         <span class="muted" id="settingsSaved"></span>
@@ -382,6 +390,10 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
   $('#botPresetsInput').value = winPath(state.config.botPresets);
   $('#mugshotRootInput').value = winPath(state.config.mugshotRoot||'');
   state.mugshotAliases = Object.assign({}, state.config.mugshotAliases||{});
+  $('#faceFinderEnabled').checked = !!state.config.faceFinderEnabled;
+  $('#faceFinderCache').checked = !!state.config.faceFinderCache;
+  $('#faceFinderCache').disabled = !$('#faceFinderEnabled').checked;
+  $('#faceFinderEnabled').onchange = ()=>{ $('#faceFinderCache').disabled = !$('#faceFinderEnabled').checked; };
   $('#profilesPath').textContent = state.config.profiles ? ('profiles (auto): '+winPath(state.config.profiles)) : '';
   $('#settingsPathNote').textContent = state.config.settingsPath ? ('saved to: '+winPath(state.config.settingsPath)) : '';
   $('#saveSettingsBtn').onclick = saveSettings;
@@ -442,7 +454,9 @@ async function saveSettings(){
     mods: $('#modsPath').value.trim(),
     profile: $('#profile').value,
     botPresets: $('#botPresetsInput').value.trim(),
-    mugshotRoot: $('#mugshotRootInput').value.trim()
+    mugshotRoot: $('#mugshotRootInput').value.trim(),
+    faceFinderEnabled: $('#faceFinderEnabled').checked,
+    faceFinderCache: $('#faceFinderCache').checked
   };
   btn.disabled=true; note.textContent='saving…';
   try{
@@ -450,6 +464,7 @@ async function saveSettings(){
     note.textContent = '✔ saved ('+(r.gameVersion||'')+')';
     state.config.game = body.game; state.config.gameVersion = r.gameVersion;
     state.config.mugshotRoot = (r.mugshotRoot!=null? r.mugshotRoot : body.mugshotRoot);
+    state.config.faceFinderEnabled = body.faceFinderEnabled; state.config.faceFinderCache = body.faceFinderCache;
     state.msVer++; state.mugshotMods = [];      // pack root may have changed — re-fetch folders + bust thumbnail cache
     if(state.config.mugshotRoot){ try{ state.mugshotMods = await api('/api/mugshot-mods'); }catch{} }
     if(state.mode==='library') renderFaces();   // thumbnails follow the new pack root

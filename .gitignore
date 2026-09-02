@@ -19,6 +19,12 @@ config/settings.json
 # reference which third-party packs you use. Local to each PC, never shared.
 library/
 
+# ── Local reference material (NOT ours to redistribute) ───────
+# Third-party / not-yet-public docs (e.g. the NPC Face Finder API doc) kept
+# locally to build against. Never commit — it isn't ours to share.
+reference/
+npc-face-finder-api-docs.html
+
 # ── Editor / OS cruft ─────────────────────────────────────────
 .vs/
 .idea/

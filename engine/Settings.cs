@@ -38,6 +38,8 @@ class AppSettings
     // Manual override: source-mod folder name -> the pack's appearance-mod folder to use for it (when the
     // auto name-match fails). Per-PC (folder names differ per modlist), so it lives in settings.json.
     public Dictionary<string, string> MugshotAliases { get; set; } = new();
+    public bool FaceFinderEnabled { get; set; } = false;  // online fallback (npcfacefinder.com) for missing faces
+    public bool FaceFinderCache { get; set; } = false;    // persist fetched images into the mugshots folder
 }
 
 static class Settings

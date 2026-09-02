@@ -36,13 +36,16 @@ static class Mugshots
             var mods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                foreach (var f in Directory.EnumerateFiles(root, "*.png", SearchOption.AllDirectories))
+                foreach (var f in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
                 {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".png" && ext != ".webp" && ext != ".jpg" && ext != ".jpeg") continue; // FaceFinder cache = .webp
                     var masterDir = Path.GetDirectoryName(f);
                     var master = Path.GetFileName(masterDir) ?? "";
                     if (master.Length == 0) continue;
                     var modName = Path.GetFileName(Path.GetDirectoryName(masterDir)) ?? ""; // grandparent = AppearanceModName
-                    var key = master.ToLowerInvariant() + "/" + Path.GetFileName(f).ToLowerInvariant();
+                    // key on the filename STEM (no extension) so a .webp cache and a .png pack collide correctly
+                    var key = master.ToLowerInvariant() + "/" + Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
                     if (!idx.TryGetValue(key, out var list)) { list = new(); idx[key] = list; }
                     list.Add((modName, Norm(modName), f));
                     if (modName.Length > 0) mods.Add(modName);
@@ -74,7 +77,7 @@ static class Mugshots
         var master = formKey[(colon + 1)..].Trim();
         if (idHex.Length == 0 || master.Length == 0) return null;
         var last6 = idHex.Length <= 6 ? idHex.PadLeft(6, '0') : idHex[^6..];
-        var key = master.ToLowerInvariant() + "/00" + last6.ToLowerInvariant() + ".png";
+        var key = master.ToLowerInvariant() + "/00" + last6.ToLowerInvariant();   // stem — matches .png OR .webp
         var idx = Index(root);
         if (!idx.TryGetValue(key, out var candidates) || candidates.Count == 0) return null;
 
@@ -90,5 +93,25 @@ static class Mugshots
         }
         if (candidates.Count == 1) return candidates[0].path;            // 3. unambiguous single pack
         return null;                                                      // 4. ambiguous -> don't guess
+    }
+
+    // Insert a just-cached FaceFinder image into the live index so the NEXT request resolves it locally
+    // (no re-fetch), without rebuilding the whole index. Keyed by (master, stem) + tagged with its source mod.
+    public static void AddToIndex(string root, string formKey, string sourceMod, string path)
+    {
+        int c = formKey.IndexOf(':');
+        if (c <= 0 || c >= formKey.Length - 1) return;
+        var id = formKey[..c].Trim();
+        var master = formKey[(c + 1)..].Trim();
+        if (id.Length == 0 || master.Length == 0) return;
+        var last6 = id.Length <= 6 ? id.PadLeft(6, '0') : id[^6..];
+        var key = master.ToLowerInvariant() + "/00" + last6.ToLowerInvariant();
+        lock (_lock)
+        {
+            if (!_cache.TryGetValue(root, out var idx)) return;   // root not indexed yet -> next rebuild picks it up
+            if (!idx.TryGetValue(key, out var list)) { list = new(); idx[key] = list; }
+            list.Add((sourceMod, Norm(sourceMod), path));
+            if (_modsCache.TryGetValue(root, out var mods) && !string.IsNullOrEmpty(sourceMod) && !mods.Contains(sourceMod)) mods.Add(sourceMod);
+        }
     }
 }
