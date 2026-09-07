@@ -79,6 +79,8 @@
   .libcol{display:none}
   .app.libmode .libcol{display:table-cell}
   .app.libmode .creatoronly{display:none}
+  .libonly{display:none}
+  .app.libmode .libonly{display:inline-block}
   td.thumbcol{width:52px}
   .thumb{width:46px;height:46px;border-radius:5px;object-fit:cover;object-position:center top;
     background:var(--panel2);border:1px solid var(--line);display:block}
@@ -201,6 +203,7 @@ window.addEventListener('unhandledrejection',function(ev){
         <button class="mini" id="selInvert">Invert</button>
         <button class="mini" id="selRace">Select filtered</button>
         <button class="mini" id="unselRace" title="deselect the faces currently shown by the filters — e.g. filter to one race to exclude it">Unselect filtered</button>
+        <button class="mini libonly" id="selVampire" title="one click: give every SELECTED face its vampire double-dip (also serve its …RaceVampire variant). If they all already have it, clears it instead. Faces with no vampire variant are skipped.">Vampire ⇄</button>
         <span class="muted flex1" style="text-align:right" id="selCount"></span>
       </div>
       <div class="facewrap">
@@ -657,12 +660,17 @@ window.setMugshotAlias = async function(sourceMod, folder){
 // ---------- faces ----------
 // A face is "usable" for the current category if its race is one the category actually has targets in,
 // and its gender can be assigned (feminize on -> female faces only; off -> gender-matched to a target).
+// Every race a face can fill: its own, plus its library double-dip (`as`) — mirrors the engine's two Pool() calls.
+function servedRaces(f){ return (f.as && f.as!==f.poolRace) ? [f.poolRace, f.as] : [f.poolRace]; }
 function faceUsable(f){
-  const d = state.demand.find(x=>x.race===f.poolRace);
-  if(!d) return false;                                   // no target of this race in this category
   const fem = $('#feminize') ? $('#feminize').checked : true;
-  if(fem) return f.sex==='F';                            // males become female -> only female faces used
-  return (f.sex==='F' && d.targetF>0) || (f.sex==='M' && d.targetM>0);
+  for(const r of servedRaces(f)){
+    const d = state.demand.find(x=>x.race===r);
+    if(!d) continue;                                     // no target of this race in this category
+    if(fem){ if(f.sex==='F') return true; continue; }    // males become female -> only female faces used
+    if((f.sex==='F' && d.targetF>0) || (f.sex==='M' && d.targetM>0)) return true;
+  }
+  return false;
 }
 
 async function refreshFaces(){
@@ -751,7 +759,7 @@ function renderFaces(){
       ${thumb}
       <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
       <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
-      <td>${esc(f.poolRace)}</td>
+      <td>${esc(f.poolRace)}${(!lib && f.as) ? ` <span class="muted" title="library double-dip: also serves ${esc(f.as)}">+${esc(shortRace(f.as))}</span>` : ''}</td>
       ${ascell}
       <td class="muted" title="${esc(f.source)}">${esc(f.source.replace(/\.esp$/i,''))}</td>
       ${blcell}
@@ -811,6 +819,19 @@ $('#selNone').onclick  = ()=>{ state.selected.clear(); renderFaces(); renderCove
 $('#selInvert').onclick = ()=>{ state.faces.forEach(f=> state.selected.has(f.id)?state.selected.delete(f.id):state.selected.add(f.id)); renderFaces(); renderCoverage(); };
 $('#selRace').onclick  = ()=>{ visibleFaces().forEach(f=>state.selected.add(f.id)); renderFaces(); renderCoverage(); };
 $('#unselRace').onclick = ()=>{ visibleFaces().forEach(f=>state.selected.delete(f.id)); renderFaces(); renderCoverage(); };
+// Library: one-click vampire double-dip on every SELECTED face. Group-toggle semantics: if any lacks it,
+// set it on all (that have a vampire variant in race_compat); if all already have it, clear it.
+$('#selVampire').onclick = ()=>{
+  const targets = [];
+  for(const f of state.faces) if(state.selected.has(f.id)){
+    const v = ((state.compat && state.compat[f.poolRace]) || []).find(r=>/vampire/i.test(r));
+    if(v) targets.push([f, v]);                       // skip faces with no vampire variant (incl. vampire-race faces)
+  }
+  if(!targets.length) return;
+  const allSet = targets.every(([f,v]) => state.raceAs[f.id]===v);
+  for(const [f,v] of targets){ if(allSet) delete state.raceAs[f.id]; else state.raceAs[f.id]=v; }
+  renderFaces(); renderLibSummary();
+};
 document.querySelectorAll('#faceTable thead th[data-k]').forEach(th=>{
   th.onclick = ()=>{ const k=th.dataset.k; state.sortDir = state.sortK===k?-state.sortDir:1; state.sortK=k; renderFaces(); };
 });
@@ -820,7 +841,7 @@ document.querySelectorAll('#faceTable thead th[data-k]').forEach(th=>{
 function selectedByRaceSex(){
   const m={};
   for(const f of state.faces) if(state.selected.has(f.id)){
-    (m[f.poolRace] ||= {F:0,M:0})[f.sex]++;
+    for(const r of servedRaces(f)) (m[r] ||= {F:0,M:0})[f.sex]++;   // a double-dip face supplies BOTH buckets
   }
   return m;
 }
@@ -842,8 +863,9 @@ function renderCoverage(){
     tgt+=need; result+=res; skip+=(need-res);
     // selected faces that COULD serve this race, vs. distinct faces that actually get placed (1 per
     // target slot — round-robin, so #distinct placed = min(faces, target slots of that gender)).
-    if(fem){ usable += sF; placed += Math.min(sF, femNeed); }
-    else { usable += (d.targetF>0?sF:0)+(d.targetM>0?sM:0); placed += Math.min(sF,d.targetF)+Math.min(sM,d.targetM); }
+    // (usable is counted per DISTINCT face below — summing per race would double-count a double-dip face)
+    if(fem){ placed += Math.min(sF, femNeed); }
+    else { placed += Math.min(sF,d.targetF)+Math.min(sM,d.targetM); }
     if(res<need) shortRaces.push(d.name||d.race);
     const facesCell = fem ? `${sF}` : `${sF}F ${sM}M`;
     let st;
@@ -854,6 +876,8 @@ function renderCoverage(){
       <td style="text-align:right">${d.targetM}</td>
       <td style="text-align:right">${d.targetF}</td><td style="text-align:right">${facesCell}</td><td>${st}</td></tr>`;
   });
+  // usable = DISTINCT selected faces that can fill some slot here (a double-dip face counts once)
+  usable = [...state.selected].reduce((n,id)=>{ const f=state.faces.find(x=>x.id===id); return n + ((f && faceUsable(f)) ? 1 : 0); }, 0);
   $('#covBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="muted">no demand data</td></tr>';
   const unused = state.selected.size - usable;
   $('#kSel').textContent = state.selected.size;

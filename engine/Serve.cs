@@ -554,12 +554,25 @@ static class Serve
             if (!wl.TryGetValue(src, out var s)) { s = Library.LoadWhitelist(src); wl[src] = s; }
             return s;
         }
+        // Also attach each face's saved `as:` double-dip (compat-guarded, same rule as the engine) so the UI
+        // treats the face as serving BOTH races — otherwise a face curated for its vampire variant looks
+        // "unusable" in a vampire category, isn't auto-selected, and never reaches the engine.
+        var ov = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> OvFor(string src)
+        {
+            if (!ov.TryGetValue(src, out var m)) { m = Library.LoadWhitelistOverrides(src); ov[src] = m; }
+            return m;
+        }
         return faces.Where(f =>
         {
             if (blacklist.Contains(f.FormKey)) return false;   // global veto
             var s = WlFor(f.Source);
             return s is null || s.Contains(f.FormKey);          // uncurated source => keep all
-        }).ToList();
+        })
+        .Select(f => OvFor(f.Source).TryGetValue(f.FormKey, out var a)
+                     && !a.Equals(f.PoolRace, StringComparison.OrdinalIgnoreCase) && RaceCompat.AreCompatible(f.PoolRace, a)
+                     ? f with { As = a } : f)
+        .ToList();
     }
 
     record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race, string? Sex);

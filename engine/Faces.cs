@@ -13,7 +13,8 @@ static class Faces
 {
     public record FaceInfo(
         string Id, string Source, string FormKey, string? EditorID,
-        string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod);
+        string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod,
+        string? As = null);   // library double-dip: an ADDITIONAL race this face also serves (set by ApplyLibrary)
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display
