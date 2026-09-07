@@ -32,6 +32,7 @@ static class Generate
         string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null, feminineHeightsPath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
         bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false; bool feminineHeights = false;
+        bool skypatcher = false;   // SkyPatcher runtime mode: copyVisualStyle lines, NO plugin/FaceGen written
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
@@ -53,6 +54,7 @@ static class Generate
                 case "--sexplague-pct": sexplaguePct = args[++i]; break; // "60,30,10" tier split (overrides yaml)
                 case "--feminine-names": feminineNames = true; feminineNamesPath = args[++i]; break; // apply feminine fullName via SkyPatcher
                 case "--feminine-heights": feminineHeights = true; feminineHeightsPath = args[++i]; break; // race-based height= op per feminized male via SkyPatcher (feminine_heights.yaml)
+                case "--skypatcher": skypatcher = true; break;    // runtime mode: one copyVisualStyle line per target; no plugin, no FaceGen, sources stay enabled
                 case "--bake-textures": bakeTextures = true; break;   // bake cross-mod face textures (brows/eyes/etc.) for self-contained output
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
                 case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
@@ -141,8 +143,9 @@ static class Generate
             var cls = Classify.Inspect(sp);
             var mode = forced ?? cls.Mode;
             srcModes.Add((cls.Plugin, mode, forced != null ? "forced" : cls.Why));
-            bool disable = mode == "disable" || mode == "standalone"; // esp off -> deep-copy records
-            bool unpack = mode == "standalone";                       // also bake assets in (fully removable)
+            // Runtime mode never deep-copies or bakes: every source stays enabled and is referenced at load.
+            bool disable = !skypatcher && (mode == "disable" || mode == "standalone"); // esp off -> deep-copy records
+            bool unpack = !skypatcher && mode == "standalone";                          // also bake assets in (fully removable)
 
             var sm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(sp), GameCfg.Release);
             var folder = Path.GetDirectoryName(Path.GetFullPath(sp))!;
@@ -191,6 +194,7 @@ static class Generate
         int femCount = 0, unmappedVoice = 0;
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
         var femRace = new Dictionary<(string plugin, uint id), string>();      // FINAL in-game race of a feminized male (for race-based heights)
+        var runtimeTargets = new List<((string plugin, uint id) key, List<string> ops)>();   // SkyPatcher runtime mode: per-target base ops, in assignment order
         var missingFaceGen = new List<string>();
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -282,6 +286,27 @@ static class Generate
             var face = faces[idx % faces.Count]; cursor[key] = idx + 1;
             report[race] = (rc.assigned + 1, rc.skipped, faces.Count);
 
+            if (skypatcher)
+            {
+                // SkyPatcher runtime: NO record override, NO FaceGen copy, NO texture baking. One ini line per target:
+                // copyVisualStyle from the donor (+ setFlags=female / voiceType when feminizing). The donor is the
+                // face's record: for an override-sourced face that's the origin NPC (e.g. Skyrim.esm|01326A), whose
+                // look at load time is whatever wins your load order — sources must stay ENABLED.
+                var d = face.Npc.FormKey;
+                var baseOps = new List<string> { $"copyVisualStyle={d.ModKey.FileName}|{d.ID:X}" };
+                if (feminize && !Fem(t))
+                {
+                    baseOps.Add("setFlags=female");
+                    if (TryFemVoice(t.Voice.FormKey, race, t.FormKey.ID, out var rv)) baseOps.Add($"voiceType={rv.ModKey.FileName}|{rv.ID:X}"); else unmappedVoice++;
+                    femCount++;
+                    feminizedNpcs.Add((t.FormKey.ModKey.FileName, t.FormKey.ID, t.Name?.String ?? ""));
+                    // copyVisualStyle does NOT change race (doc: "gender and race should match") -> the target keeps its own
+                    femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = race;
+                }
+                runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps));
+                continue;
+            }
+
             var npc = outMod.Npcs.GetOrAddAsOverride(t);
             var s = face.Npc;
             ApplyFaceFields(npc, face, keepRace: face.Overlay);
@@ -318,7 +343,8 @@ static class Generate
         // Boost injects EXTRA clones into vanilla leveled lists — meaningless for a load-order scan of
         // placed unique actors (no per-NPC "slot count"). Silently a no-op there; the UI hides it too.
         if (boost && scan) Console.WriteLine("\nLeveled-List Boost: not applicable to a load-order scan category — skipped.");
-        if (boost && !scan)
+        if (boost && skypatcher) Console.WriteLine("\nLeveled-List Boost: not available in SkyPatcher runtime mode (no NPC records are written) — skipped.");
+        if (boost && !scan && !skypatcher)
         {
             // which LeveledNpc lists each vanilla NPC sits in, with the entry's level+count
             var lvlnOfNpc = new Dictionary<FormKey, List<(FormKey ll, short lvl, short cnt)>>();
@@ -450,9 +476,14 @@ static class Generate
 
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
-        outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
-        Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
-                          (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
+        if (skypatcher)
+            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled).");
+        else
+        {
+            outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
+            Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
+                              (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
+        }
 
         int totalAssigned = report.Values.Sum(v => v.assigned), totalSkipped = report.Values.Sum(v => v.skipped);
         Console.WriteLine("Source classification:");
@@ -531,20 +562,46 @@ static class Generate
             if (feminineHeights && femHeights is null) Console.WriteLine("\nFeminine heights: enabled but feminine_heights.yaml not found/invalid — skipped.");
 
             // One line per NPC that carries at least one op (SkyPatcher merges multiple : ops per NPC).
-            var npcLines = new List<string>();
-            foreach (var f in feminizedNpcs)
+            // Per-feminized-NPC ops: SexPlague tier/seed/ability, race-based height, feminine name. Names MUST use
+            // SkyPatcher's ~tilde~ string syntax — a bare fullName= is silently ignored in game (confirmed by the
+            // user); shortName gets the first token. Height decimal is invariant-culture (a pt-BR comma would break
+            // SkyPatcher's parse).
+            List<string> FemOps(string plugin, uint id, string name)
             {
                 var ops = new List<string>();
-                if (sexOp.TryGetValue((f.plugin, f.id), out var so)) ops.Add(so);
-                // height= before fullName (fullName must stay LAST — its spaces run to end of line). Invariant
-                // culture: a comma decimal from a pt-BR/DE locale would silently break SkyPatcher's parse.
-                if (femHeights is not null && femRace.TryGetValue((f.plugin, f.id), out var fr))
+                if (sexOp.TryGetValue((plugin, id), out var so)) ops.Add(so);
+                if (femHeights is not null && femRace.TryGetValue((plugin, id), out var fr))
                 { ops.Add("height=" + femHeights.For(fr).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)); heighted++; }
-                if (femNameMap is not null && !string.IsNullOrEmpty(f.name)
-                    && femNameMap.TryGetValue(f.name, out var fn)) { ops.Add($"fullName={fn}"); renamed++; }
-                if (ops.Count == 0) continue;
-                npcLines.Add($"filterByNpcs={f.plugin}|{f.id:X}:" + string.Join(":", ops));
+                if (femNameMap is not null && !string.IsNullOrEmpty(name) && femNameMap.TryGetValue(name, out var fn))
+                {
+                    ops.Add($"fullName=~{fn}~");
+                    var first = fn.Split(' ', 2)[0];
+                    if (first.Length > 0 && first != fn) ops.Add($"shortName=~{first}~");
+                    renamed++;
+                }
+                return ops;
             }
+            var npcLines = new List<string>();
+            if (skypatcher)
+            {
+                // Runtime mode: EVERY assigned target gets a line — copyVisualStyle [+ setFlags/voiceType] — plus the
+                // feminized-only ops when it was feminized. One line per NPC, all ops colon-joined.
+                var femName = new Dictionary<(string plugin, uint id), string>();
+                foreach (var f in feminizedNpcs) femName.TryAdd((f.plugin, f.id), f.name);
+                foreach (var (key, baseOps) in runtimeTargets)
+                {
+                    var ops = new List<string>(baseOps);
+                    if (femName.TryGetValue(key, out var nm)) ops.AddRange(FemOps(key.plugin, key.id, nm));
+                    npcLines.Add($"filterByNpcs={key.plugin}|{key.id:X}:" + string.Join(":", ops));
+                }
+            }
+            else
+                foreach (var f in feminizedNpcs)
+                {
+                    var ops = FemOps(f.plugin, f.id, f.name);
+                    if (ops.Count == 0) continue;
+                    npcLines.Add($"filterByNpcs={f.plugin}|{f.id:X}:" + string.Join(":", ops));
+                }
 
             var iniDir = Path.Combine(outFolder, "SKSE", "Plugins", "SkyPatcher", "npc");
             if (npcLines.Count > 0)
@@ -569,9 +626,10 @@ static class Generate
         // Masters are computed during write, not back-populated on the in-memory mod — re-read the file.
         // Dispose the overlay immediately (it memory-maps the file): a long-running server would otherwise
         // keep the output ESP locked, blocking a regenerate to the same folder.
-        List<string> masters;
-        using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
-            masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
+        List<string> masters = new();
+        if (!skypatcher)   // runtime mode writes no plugin, so there is nothing to re-read
+            using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
+                masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
         // Classify sources for the manifest. After the deep-copy above, a disable/standalone source is no
         // longer a master (its records are copied in), so it can genuinely be turned off. Reconcile against
         // the ACTUAL master list: anything still mastered (a referenced record we couldn't copy out) must
@@ -588,7 +646,14 @@ static class Generate
         var rd = new System.Text.StringBuilder();
         rd.Append($"{outName} — generated by FaceDiversityApp (personal use only; do not redistribute)\n\n");
         rd.Append($"Category: {category}.  {totalAssigned} faces ({femCount} feminized males), {totalSkipped} skipped.\n");
-        rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
+        if (skypatcher)
+            rd.Append($"Output type: SKYPATCHER RUNTIME — no plugin written. {runtimeTargets.Count} targets get their face at load via\n"
+                    + "  copyVisualStyle (+ setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
+                    + "  mod must stay ENABLED (their NPC records + FaceGen are used directly). No NPC record overrides are written,\n"
+                    + "  so this coexists with other mods that edit the same NPCs. An override-sourced face copies that NPC's look\n"
+                    + "  as it wins YOUR load order.\n");
+        else
+            rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
         if (bakeTextures)
             rd.Append($"Textures: BAKED — {bakedCrossMod} cross-mod face textures (brows/eyes/hair from other packs)\n"
                     + "  are copied into THIS mod; only shared skin/body is left to its overhaul.\n");
@@ -626,7 +691,7 @@ static class Generate
         if (missingFaceGen.Count > 0)
             rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
         File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
-        Console.WriteLine($"Wrote {esp}");
+        Console.WriteLine(skypatcher ? $"Wrote SkyPatcher runtime config under {outFolder} (no plugin)" : $"Wrote {esp}");
         return 0;
     }
 

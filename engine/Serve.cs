@@ -433,7 +433,7 @@ static class Serve
     record GenSource(string Path, string? Mode);
     record GenReq(string? Category, List<GenSource>? Sources, List<string>? Include, string? Name, string? Out,
                   bool Feminize = true, bool Boost = false, bool Sexplague = false, List<int>? SexplaguePct = null,
-                  bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false);
+                  bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false, bool Runtime = false);
 
     static string FeminineNamesPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_names.yaml");
     static string FeminineHeightsPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_heights.yaml");
@@ -480,6 +480,7 @@ static class Serve
         }
         if (req.FeminineNames && File.Exists(FeminineNamesPath())) { a.Add("--feminine-names"); a.Add(FeminineNamesPath()); }
         if (req.FeminineHeights && File.Exists(FeminineHeightsPath())) { a.Add("--feminine-heights"); a.Add(FeminineHeightsPath()); }
+        if (req.Runtime) a.Add("--skypatcher");   // SkyPatcher runtime mode: copyVisualStyle lines, no plugin/FaceGen
         // Bake textures: hand the engine the enabled mod folders (MO2 priority) so it can resolve + bake
         // cross-mod face textures (brows/eyes) into a self-contained output.
         string? assetDirsFile = null;

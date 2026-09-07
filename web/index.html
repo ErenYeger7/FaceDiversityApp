@@ -289,7 +289,7 @@ window.addEventListener('unhandledrejection',function(ev){
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
         <input type="checkbox" id="boost">
-        <span>Leveled-List Boost — place extra faces as new NPCs <span class="muted" id="boostNote"></span></span>
+        <span>Leveled-List Boost — place extra faces as new NPCs (in the esp) <span class="muted" id="boostNote"></span></span>
       </label>
       <div class="muted" id="boostDetail" style="margin:4px 0 0 23px"></div>
 
@@ -308,6 +308,11 @@ window.addEventListener('unhandledrejection',function(ev){
       <label class="row" id="fhRow" style="margin-top:10px;gap:8px;cursor:pointer">
         <input type="checkbox" id="femHeights">
         <span>Apply feminine heights <span class="muted" id="fhNote"></span></span>
+      </label>
+
+      <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="skypatcherMode">
+        <span>Build as SkyPatcher file <span class="muted">(origin mods will be active in the load order) — no NPC record overrides or FaceGen copies; faces are applied at load via copyVisualStyle, so it coexists with other mods editing the same NPCs</span></span>
       </label>
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
@@ -525,7 +530,8 @@ function autoName(){
   const sp  = $('#sexplague').checked && !$('#sexplague').disabled;
   const fn  = $('#femNames').checked && !$('#femNames').disabled;
   const fh  = $('#femHeights').checked && !$('#femHeights').disabled;
-  return 'FDA_'+groupToken()+(fem?'_F':'')+(ll?'_LL':'')+(sp?'_SP':'')+(fn?'_FN':'')+(fh?'_FH':'')+'.esp';
+  const rt  = isRuntime();
+  return 'FDA_'+groupToken()+(fem?'_F':'')+(ll?'_LL':'')+(sp?'_SP':'')+(fn?'_FN':'')+(fh?'_FH':'')+(rt?'_RT':'')+'.esp';
 }
 function refreshName(){ if(state.autoName!==false) $('#outName').value = autoName(); }
 // user edits -> stop auto; clear the field -> resume auto
@@ -652,7 +658,7 @@ function renderSources(){
     <div class="src">
       <span class="badge b-${s.mode}">${s.mode.toUpperCase()}</span>
       <span class="name" title="${esc(s.path)}\n${esc(s.why||'')}">${esc(s.plugin)} <span class="muted">· ${s.femaleNpcs} F</span></span>
-      <select title="${esc(MODE_HELP)}" onchange="setMode('${jsq(s.path)}',this.value)">
+      <select title="${esc(isRuntime() ? 'SkyPatcher runtime: every source stays enabled and is referenced at load — keep/disable/standalone do not apply' : MODE_HELP)}" ${isRuntime()?'disabled':''} onchange="setMode('${jsq(s.path)}',this.value)">
         ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
       </select>
       <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
@@ -933,6 +939,12 @@ function renderCoverage(){
     + (esl?` — fits the 2048 ESPFE limit.`
           :` — exceeds 2048, so it ships as a full ESP (one load-order slot). To keep it ESPFE, use fewer disable/standalone sources or switch some to <b>keep</b> mode.`)
     + `</div>` : '';
+  if(isRuntime()){
+    $('#eslProj').innerHTML = state.sources.length
+      ? `<div class="warnbox" style="background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff">SkyPatcher runtime: <b>no plugin records</b> — faces are applied at load via <code>copyVisualStyle</code>, so nothing counts against the ESL limit and no other NPC mod is overridden. All <b>${state.sources.length}</b> source mod(s) must stay <b>enabled</b>.</div>`
+      : '';
+    $('#boost').checked=false; $('#boost').disabled=true; $('#boostNote').textContent='(N/A in SkyPatcher runtime mode — needs records in an esp)';
+  }
 
   let msg = '';
   if(extra > 0){
@@ -955,6 +967,22 @@ function renderCoverage(){
 // ---------- create ----------
 $('#feminize').onchange = ()=>{ if(state.faces.length) renderFaces(); renderCoverage(); refreshName(); }; // usability depends on feminize
 $('#boost').onchange = ()=>{ renderCoverage(); refreshName(); };
+// SkyPatcher runtime mode: no plugin, no FaceGen, no baking — sources stay enabled. Checking it turns Bake
+// textures off (and disables it); Boost is N/A (handled in renderCoverage); per-source modes are moot.
+function isRuntime(){ const c=$('#skypatcherMode'); return !!c && c.checked; }
+function applySkyMode(){
+  const rt=isRuntime();
+  if(rt) $('#bakeTextures').checked=false;
+  $('#bakeTextures').disabled = rt;
+  if(!rt){   // leaving runtime: restore Boost to what the category allows (renderCoverage only disables it while runtime is on)
+    const c = state.config && state.config.categories.find(x=>x.key===$('#category').value);
+    const scan = !!(c && c.scan), b = !!(state.boostInfo && state.boostInfo.boostable);
+    $('#boost').disabled = !b;
+    $('#boostNote').textContent = b ? `(${state.boostInfo.lists} leveled lists)` : (scan ? '(N/A — placed uniques, no leveled-list slots)' : '(not available — no leveled lists for this category)');
+  }
+  renderSources(); renderCoverage(); refreshName();
+}
+$('#skypatcherMode').onchange = applySkyMode;
 $('#agree').onchange = ()=> $('#createBtn').disabled = !$('#agree').checked;
 $('#createBtn').onclick = async ()=>{
   if(!state.sources.length){ alert('Add at least one source mod.'); return; }
@@ -974,7 +1002,8 @@ $('#createBtn').onclick = async ()=>{
     sexplaguePct: spOn ? spPcts() : null,
     feminineNames: $('#femNames').checked,
     feminineHeights: $('#femHeights').checked,
-    bakeTextures: $('#bakeTextures').checked
+    bakeTextures: $('#bakeTextures').checked,
+    runtime: isRuntime()
   };
   let res;
   try { res = await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }
