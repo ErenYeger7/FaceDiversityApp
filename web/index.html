@@ -155,6 +155,8 @@ window.addEventListener('unhandledrejection',function(ev){
         <input type="checkbox" id="faceFinderCache">
         <span>Cache fetched images into the mugshots folder <span class="muted">— saved under “FaceFinder Cache\…” so they load locally (and offline) next time; needs a mugshots folder set</span></span>
       </label>
+      <label class="fld">Output folder (default root) <span class="muted">— generated mods land in &lt;root&gt;\&lt;name&gt;; blank = the app's own out\ folder</span></label>
+      <input type="text" id="outDirDefaultInput" placeholder="…\FaceDiversityApp\out (or a staging folder your mod manager watches)">
       <div class="row" style="margin-top:8px;gap:8px;align-items:center">
         <button class="mini" id="saveSettingsBtn">Save settings</button>
         <span class="muted" id="settingsSaved"></span>
@@ -393,6 +395,8 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
   $('#botPresetsInput').value = winPath(state.config.botPresets);
   $('#mugshotRootInput').value = winPath(state.config.mugshotRoot||'');
   state.mugshotAliases = Object.assign({}, state.config.mugshotAliases||{});
+  $('#outDirDefaultInput').value = winPath(state.config.outDir||'');
+  $('#outDir').placeholder = '(default: '+winPath(state.config.outDir||'out')+'\\<name>)';   // per-generate override box
   $('#faceFinderEnabled').checked = !!state.config.faceFinderEnabled;
   $('#faceFinderCache').checked = !!state.config.faceFinderCache;
   $('#faceFinderCache').disabled = !$('#faceFinderEnabled').checked;
@@ -459,7 +463,8 @@ async function saveSettings(){
     botPresets: $('#botPresetsInput').value.trim(),
     mugshotRoot: $('#mugshotRootInput').value.trim(),
     faceFinderEnabled: $('#faceFinderEnabled').checked,
-    faceFinderCache: $('#faceFinderCache').checked
+    faceFinderCache: $('#faceFinderCache').checked,
+    outDir: $('#outDirDefaultInput').value.trim()
   };
   btn.disabled=true; note.textContent='saving…';
   try{
@@ -468,6 +473,9 @@ async function saveSettings(){
     state.config.game = body.game; state.config.gameVersion = r.gameVersion;
     state.config.mugshotRoot = (r.mugshotRoot!=null? r.mugshotRoot : body.mugshotRoot);
     state.config.faceFinderEnabled = body.faceFinderEnabled; state.config.faceFinderCache = body.faceFinderCache;
+    state.config.outDir = (r.outDir!=null ? r.outDir : body.outDir);
+    $('#outDirDefaultInput').value = winPath(state.config.outDir||'');           // server may have reverted blank -> default
+    $('#outDir').placeholder = '(default: '+winPath(state.config.outDir||'out')+'\\<name>)';
     state.msVer++; state.mugshotMods = [];      // pack root may have changed — re-fetch folders + bust thumbnail cache
     if(state.config.mugshotRoot){ try{ state.mugshotMods = await api('/api/mugshot-mods'); }catch{} }
     if(state.mode==='library') renderFaces();   // thumbnails follow the new pack root
@@ -892,7 +900,13 @@ function renderCoverage(){
 
   // Projected plugin type: only NEW records count against the 2048 ESPFE limit — head parts deep-copied
   // from disable/standalone sources (keep-mode references them) + boost clones. Overrides don't count.
-  const hdptNew = state.sources.filter(s=>s.mode==='disable'||s.mode==='standalone').reduce((a,s)=>a+(s.ownHdpt||0),0);
+  // SAME RULE AS THE ENGINE: a disable/standalone build deep-copies only the head parts actually WORN by the
+  // faces it assigns (selected + usable), transitively via ExtraParts, deduplicated. (It used to sum each
+  // source's TOTAL head parts, so the banner showed the whole pack's count regardless of selection.)
+  const dsPlugins = new Set(state.sources.filter(s=>s.mode==='disable'||s.mode==='standalone').map(s=>s.plugin));
+  const worn = new Set();
+  for(const f of state.faces) if(dsPlugins.has(f.source) && state.selected.has(f.id) && faceUsable(f)) for(const k of (f.headPartKeys||[])) worn.add(k);
+  const hdptNew = worn.size;
   const boostNew = (boostOn && boostable) ? extra : 0;
   const newRecs = hdptNew + boostNew;
   const esl = newRecs <= 2048;
@@ -900,7 +914,7 @@ function renderCoverage(){
     `<div class="warnbox" style="${esl?'background:rgba(75,191,115,.08);border-color:rgba(75,191,115,.3);color:#b6e6c6'
                                      :'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
     + `Projected output: <b>${esl?'ESPFE (ESL-flagged)':'FULL ESP'}</b> · <b>${newRecs}</b> new record${newRecs===1?'':'s'}`
-    + (boostNew>0?` (${hdptNew} head parts + ${boostNew} boost NPCs)`:` (head parts)`)
+    + (boostNew>0?` (${hdptNew} worn head parts + ${boostNew} boost NPCs)`:` (worn head parts — the texture sets copied with them add a few)`)
     + (esl?` — fits the 2048 ESPFE limit.`
           :` — exceeds 2048, so it ships as a full ESP (one load-order slot). To keep it ESPFE, use fewer disable/standalone sources or switch some to <b>keep</b> mode.`)
     + `</div>` : '';

@@ -14,7 +14,8 @@ static class Faces
     public record FaceInfo(
         string Id, string Source, string FormKey, string? EditorID,
         string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod,
-        string? As = null);   // library double-dip: an ADDITIONAL race this face also serves (set by ApplyLibrary)
+        string? As = null,    // library double-dip: an ADDITIONAL race this face also serves (set by ApplyLibrary)
+        string[]? HeadPartKeys = null);   // head parts this face wears that live IN its source plugin (transitive via ExtraParts) — what a disable/standalone build deep-copies
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display
@@ -44,6 +45,23 @@ static class Faces
             try { sm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(sp), GameCfg.Release); }
             catch { continue; }
             using (sm)
+            {
+                // Head-part records that live IN this plugin (own + overrides) — the same membership the engine's
+                // srcRec uses when a disable/standalone build deep-copies a face's worn parts (+ ExtraParts).
+                var ownHdpt = sm.HeadParts.ToDictionary(h => h.FormKey);
+                string[] WornKeys(INpcGetter npc)
+                {
+                    var keys = new List<string>(); var seen = new HashSet<FormKey>();
+                    var q = new Queue<FormKey>(npc.HeadParts.Select(h => h.FormKey));
+                    while (q.Count > 0)
+                    {
+                        var k = q.Dequeue();
+                        if (!seen.Add(k) || !ownHdpt.TryGetValue(k, out var h)) continue;   // vanilla/other-plugin parts aren't copied
+                        keys.Add(k.ToString());
+                        foreach (var e in h.ExtraParts) q.Enqueue(e.FormKey);
+                    }
+                    return keys.ToArray();
+                }
                 foreach (var n in sm.Npcs)
                 {
                     bool custom = !Classify.BaseMasters.Contains(n.Race.FormKey.ModKey.FileName);
@@ -54,8 +72,9 @@ static class Faces
                     list.Add(new FaceInfo(
                         FaceId(sp, n.FormKey), Path.GetFileName(sp), n.FormKey.ToString(), n.EditorID,
                         poolRace, RaceOf(n.Race.FormKey), n.Voice.FormKey.IsNull ? null : n.Voice.FormKey.ToString(),
-                        custom, Fem(n) ? "F" : "M", sourceMod));
+                        custom, Fem(n) ? "F" : "M", sourceMod, HeadPartKeys: WornKeys(n)));
                 }
+            }
         }
         return list;
     }

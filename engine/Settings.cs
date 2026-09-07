@@ -40,6 +40,7 @@ class AppSettings
     public Dictionary<string, string> MugshotAliases { get; set; } = new();
     public bool FaceFinderEnabled { get; set; } = false;  // online fallback (npcfacefinder.com) for missing faces
     public bool FaceFinderCache { get; set; } = false;    // persist fetched images into the mugshots folder
+    public string OutDir { get; set; } = "";              // default output ROOT (mods land in <OutDir>/<name>); blank = <app>/out
 }
 
 static class Settings

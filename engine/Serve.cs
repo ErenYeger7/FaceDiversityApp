@@ -65,7 +65,7 @@ static class Serve
         Config = Path.Combine(home, "config", "categories.yaml");
         VoiceMap = Path.Combine(home, "config", "voice_map.yaml");
         WebRoot = Path.Combine(home, "web");
-        OutDir = Path.Combine(home, "out");
+        OutDir = Norm(Def(s.OutDir, Path.Combine(home, "out")));   // persisted per-PC; blank = <app>/out
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
@@ -267,7 +267,7 @@ static class Serve
     };
 
     record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData, string? MugshotRoot,
-                       bool? FaceFinderEnabled, bool? FaceFinderCache);
+                       bool? FaceFinderEnabled, bool? FaceFinderCache, string? OutDir);
 
     // Persist per-PC settings from the UI: update the live server config + config/settings.json + the
     // global game release. Only non-empty fields are applied (blank = keep current live value).
@@ -295,12 +295,15 @@ static class Serve
         if (req.MugshotRoot is not null) { MugshotRoot = req.MugshotRoot.Trim(); Mugshots.Invalidate(); }
         if (req.FaceFinderEnabled is not null) FaceFinderEnabled = req.FaceFinderEnabled.Value;
         if (req.FaceFinderCache is not null) FaceFinderCache = req.FaceFinderCache.Value;
+        // output root: present-but-blank means "back to the default <app>/out" (unlike the keep-if-blank paths)
+        if (req.OutDir is not null)
+            OutDir = string.IsNullOrWhiteSpace(req.OutDir) ? Path.Combine(Settings.AppHome(), "out") : req.OutDir.Trim();
         // base-game Data folder: explicit override wins; else if game changed, re-derive as its folder.
         if (!string.IsNullOrWhiteSpace(req.GameData)) GameData = req.GameData!.Trim();
         else if (gameChanged) GameData = Path.GetDirectoryName(Path.GetFullPath(Game)) ?? Game;
         if (!string.IsNullOrWhiteSpace(req.GameVersion)) GameCfg.Release = GameCfg.Parse(req.GameVersion);
 
-        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData); MugshotRoot = Norm(MugshotRoot);
+        Game = Norm(Game); Mods = Norm(Mods); Profiles = Norm(Profiles); BotPresets = Norm(BotPresets); GameData = Norm(GameData); MugshotRoot = Norm(MugshotRoot); OutDir = Norm(OutDir);
 
         // the selected profile may not exist under a newly-derived profiles dir — fall back to the first.
         var profileList = ListProfiles();
@@ -313,14 +316,14 @@ static class Serve
             GameVersion = GameCfg.Canon(GameCfg.Release),
             Game = Game, GameData = GameData, Mods = Mods, Profiles = Profiles, Profile = Profile, BotPresets = BotPresets,
             MugshotRoot = MugshotRoot, MugshotAliases = new(MugshotAliases),
-            FaceFinderEnabled = FaceFinderEnabled, FaceFinderCache = FaceFinderCache
+            FaceFinderEnabled = FaceFinderEnabled, FaceFinderCache = FaceFinderCache, OutDir = OutDir
         };
         Settings.Save();
         Send(ctx, 200, "application/json", Json(new
         {
             ok = true, saved = Settings.FilePath, gameVersion = GameCfg.Canon(GameCfg.Release),
             profiles = Profiles, profile = Profile, profileList, gameData = GameData, mugshotRoot = MugshotRoot,
-            faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache
+            faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache, outDir = OutDir
         }));
     }
 
