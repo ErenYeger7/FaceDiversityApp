@@ -14,8 +14,9 @@ static class Faces
     public record FaceInfo(
         string Id, string Source, string FormKey, string? EditorID,
         string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod,
-        string? As = null,    // library double-dip: an ADDITIONAL race this face also serves (set by ApplyLibrary)
-        string[]? HeadPartKeys = null);   // head parts this face wears that live IN its source plugin (transitive via ExtraParts) — what a disable/standalone build deep-copies
+        string? As = null,    // library double-dip: an ADDITIONAL race this face also serves (overlay; set by ApplyLibrary)
+        string[]? HeadPartKeys = null,    // head parts this face wears that live IN its source plugin (transitive via ExtraParts) — what a disable/standalone build deep-copies
+        string? Serve = null);            // library adopt: a vanilla race this CUSTOM-race face is pooled under; the target adopts the face's race (set by ApplyLibrary)
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display
@@ -173,6 +174,18 @@ static class Faces
             if (humanoid) list.Add((eid, eid));
         }
         return list.OrderBy(x => x.Item2, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // Vanilla PLAYABLE races (the 10 base races, by the Race Playable flag) — the `serve:` dropdown for a
+    // custom-race face: it gets pooled under one of these so vanilla slots draw it, and the target then ADOPTS
+    // the face's own race. Vampire/Elder/Dremora variants are excluded on purpose: adopting a follower race
+    // into a vampire slot would de-vampire it (the overlay `as:` path exists for that case).
+    public static List<string> PlayableRaces(string game)
+    {
+        using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
+        return esm.Races.Where(r => r.Flags.HasFlag(Race.Flag.Playable) && !string.IsNullOrEmpty(r.EditorID)
+                                    && !r.EditorID!.Contains("Child", StringComparison.OrdinalIgnoreCase))
+                        .Select(r => r.EditorID!).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     // How many vanilla LeveledNpc lists directly reference this category's NPCs — i.e. whether the

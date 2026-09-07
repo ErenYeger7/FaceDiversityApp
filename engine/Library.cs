@@ -25,12 +25,17 @@ using YamlDotNet.Serialization.NamingConventions;
 // Files are personal data (they encode taste + which third-party packs you use) and are gitignored.
 static class Library
 {
-    // A face/NPC entry. `As` is reserved for the PHASE-2 race merger (treat this face as another race);
-    // unused in phase 1 but already in the on-disk shape so enabling it later needs no format change.
+    // A face/NPC entry. Two optional extra-race keys, deliberately distinct:
+    //   `As`    — OVERLAY double-dip onto a head-compatible race (its vampire variant): the target keeps its
+    //             race and wears this face. Compat-guarded (race_compat.yaml).
+    //   `Serve` — ADOPT: a CUSTOM-race face (which pools under a hex race no vanilla slot draws) is pooled
+    //             under a vanilla race; the target then adopts the face's own race, keeping the author's
+    //             custom skin/head. Its source mod must stay enabled (it's a master).
     public class FaceEntry
     {
         public string Key { get; set; } = "";
         public string? As { get; set; }
+        public string? Serve { get; set; }
         [YamlIgnore] public string? EditorID { get; set; }   // written as a trailing comment only
         [YamlIgnore] public string? Race { get; set; }       // used for race_summary + trailing comment
         [YamlIgnore] public string? Sex { get; set; }        // "F"/"M" — used for race_summary only
@@ -88,12 +93,19 @@ static class Library
         catch { return new(); }
     }
 
-    // faceKey -> race the face should be POOLED as (phase-2 merger). Only entries carrying a non-empty `as`.
+    // faceKey -> race the face ALSO serves as an OVERLAY (`as:`). Only entries carrying a non-empty `as`.
     public static Dictionary<string, string> LoadWhitelistOverrides(string plugin) =>
         LoadWhitelistEntries(plugin)
             .Where(f => !string.IsNullOrWhiteSpace(f.As))
             .GroupBy(f => f.Key.Trim(), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().As!.Trim(), StringComparer.OrdinalIgnoreCase);
+
+    // faceKey -> vanilla race a custom-race face is pooled under as an ADOPT draw (`serve:`).
+    public static Dictionary<string, string> LoadWhitelistServes(string plugin) =>
+        LoadWhitelistEntries(plugin)
+            .Where(f => !string.IsNullOrWhiteSpace(f.Serve))
+            .GroupBy(f => f.Key.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Serve!.Trim(), StringComparer.OrdinalIgnoreCase);
 
     // Per-race face counts saved with the whitelist, or null if the source has no whitelist (uncurated).
     public static Dictionary<string, RaceCount>? LoadWhitelistSummary(string plugin)
@@ -115,8 +127,11 @@ static class Library
         var sb = new System.Text.StringBuilder();
         sb.Append("# FaceDiversityApp — curated face whitelist for ").Append(plugin).Append('\n');
         sb.Append("# Faces NOT listed here are BLOCKED when this mod is used in Mod Creator Mode.\n");
-        sb.Append("# `as: <Race>` (optional) pools the face AS that race — it fills that race's slots and the\n");
-        sb.Append("# target then adopts this face's own race (a consistent NPC, not a face on a mismatched body).\n");
+        sb.Append("# `as: <Race>` (optional) ALSO serves that head-compatible race (its vampire variant) — a double-dip:\n");
+        sb.Append("#   the target KEEPS its race and wears this face (+ the body skin the face's author set, if any).\n");
+        sb.Append("# `serve: <Race>` (optional) — for a CUSTOM-race face no vanilla slot can draw: pools it under that\n");
+        sb.Append("#   vanilla race; the target then ADOPTS this face's own race (keeps the author's skin/head).\n");
+        sb.Append("#   The face's source mod must stay enabled (it becomes a master).\n");
         sb.Append("plugin: ").Append(Quote(plugin)).Append('\n');
 
         var deduped = faces.Where(f => !string.IsNullOrWhiteSpace(f.Key))
@@ -131,10 +146,15 @@ static class Library
             if (!summary.TryGetValue(race, out var c)) summary[race] = c = new RaceCount();
             if (string.Equals(sex, "M", StringComparison.OrdinalIgnoreCase)) c.M++; else c.F++;
         }
-        foreach (var f in deduped) { Tally(f.Race, f.Sex); if (!string.IsNullOrWhiteSpace(f.As)) Tally(f.As, f.Sex); }
+        foreach (var f in deduped)
+        {
+            Tally(f.Race, f.Sex);
+            if (!string.IsNullOrWhiteSpace(f.As)) Tally(f.As, f.Sex);
+            if (!string.IsNullOrWhiteSpace(f.Serve)) Tally(f.Serve, f.Sex);
+        }
         if (summary.Count > 0)
         {
-            sb.Append("# faces per race (incl. \"also serve\" double-dips) — surfaced in Mod Creator:\n");
+            sb.Append("# faces per race (incl. \"also serve\" double-dips and `serve:` adopt races) — surfaced in Mod Creator:\n");
             sb.Append("raceSummary:\n");
             foreach (var kv in summary) sb.Append("  ").Append(kv.Key).Append(": { f: ").Append(kv.Value.F).Append(", m: ").Append(kv.Value.M).Append(" }\n");
         }
@@ -145,6 +165,7 @@ static class Library
             // flow mapping so key + optional `as` sit on one line and still parse (block `- key:, as:` does NOT).
             sb.Append("  - { key: ").Append(Quote(f.Key.Trim()));
             if (!string.IsNullOrWhiteSpace(f.As)) sb.Append(", as: ").Append(Quote(f.As!.Trim()));
+            if (!string.IsNullOrWhiteSpace(f.Serve)) sb.Append(", serve: ").Append(Quote(f.Serve!.Trim()));
             sb.Append(" }");
             var c = Comment(f.EditorID, f.Race);
             if (c is not null) sb.Append("   # ").Append(c);

@@ -83,7 +83,7 @@ static class Serve
                 case "--port": port = int.Parse(args[++i]); break;
             }
         Categories.Load(File.Exists(Config) ? Config : null);
-        RaceCompat.Load(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(Config)) ?? ".", "race_compat.yaml"));
+        RaceCompat.Load(RaceCompatPath());
 
         // Bind both loopback hosts so either http://127.0.0.1:<port>/ or http://localhost:<port>/ works.
         // "localhost" may need a URL ACL on some Windows setups; if the dual bind fails, fall back to the IP.
@@ -154,6 +154,7 @@ static class Serve
                     var wl = Library.LoadWhitelist(plugin!);
                     Send(ctx, 200, "application/json", Json(new { plugin, hasWhitelist = wl != null,
                         keys = wl?.ToArray() ?? Array.Empty<string>(), overrides = Library.LoadWhitelistOverrides(plugin!),
+                        serves = Library.LoadWhitelistServes(plugin!),
                         summary = Library.LoadWhitelistSummary(plugin!) })); return;
                 }
                 case "/api/races":
@@ -162,7 +163,16 @@ static class Serve
                     catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
                     return;
                 }
-                case "/api/race-compat": Send(ctx, 200, "application/json", Json(RaceCompat.Map())); return;
+                // Hot-reload the compat groups on every request so a race_compat.yaml edit shows up in the "Also"
+                // dropdown without a restart (generation already re-reads it per run — this keeps both in step).
+                case "/api/race-compat": RaceCompat.Load(RaceCompatPath()); Send(ctx, 200, "application/json", Json(RaceCompat.Map())); return;
+                // Vanilla playable races — the `serve:` (adopt) dropdown for custom-race faces.
+                case "/api/serve-races":
+                {
+                    try { Send(ctx, 200, "application/json", Json(Faces.PlayableRaces(Game))); }
+                    catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
                 case "/api/library/blacklist":
                 {
                     if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
@@ -436,6 +446,7 @@ static class Serve
                   bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false, bool Runtime = false);
 
     static string FeminineNamesPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_names.yaml");
+    static string RaceCompatPath() => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(Config)) ?? ".", "race_compat.yaml");
     static string FeminineHeightsPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_heights.yaml");
 
     static void HandleGenerate(HttpListenerContext ctx)
@@ -492,8 +503,9 @@ static class Serve
             a.Add("--bake-textures"); a.Add("--asset-dirs"); a.Add(assetDirsFile);
         }
         if (includeFile is not null) { a.Add("--include"); a.Add(includeFile); }
-        // Race merger: collect each source's saved `as:` overrides into a TSV (faceId<TAB>race). Only
-        // curated sources (with a whitelist file) contribute; the engine remaps only the faces it pools.
+        // Race merger: collect each source's saved extra races into a TSV — `as:` overlays as
+        // faceId<TAB>race, `serve:` adopts as faceId<TAB>race<TAB>adopt. Only curated sources (with a
+        // whitelist file) contribute; the engine remaps only the faces it pools.
         string? raceOvFile = null;
         {
             var lines = new List<string>();
@@ -502,6 +514,8 @@ static class Serve
                 var plugin = Path.GetFileName(s.Path);
                 foreach (var kv in Library.LoadWhitelistOverrides(plugin))
                     lines.Add($"{plugin}#{kv.Key}\t{kv.Value}");
+                foreach (var kv in Library.LoadWhitelistServes(plugin))
+                    lines.Add($"{plugin}#{kv.Key}\t{kv.Value}\tadopt");
             }
             if (lines.Count > 0)
             {
@@ -579,6 +593,14 @@ static class Serve
             if (!ov.TryGetValue(src, out var m)) { m = Library.LoadWhitelistOverrides(src); ov[src] = m; }
             return m;
         }
+        // ...and its saved `serve:` adopt race (a custom-race face pooled under a vanilla race). No compat
+        // guard — the target adopts the face's race, so the NPC is a consistent whole (same rule as the engine).
+        var sv = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> SvFor(string src)
+        {
+            if (!sv.TryGetValue(src, out var m)) { m = Library.LoadWhitelistServes(src); sv[src] = m; }
+            return m;
+        }
         return faces.Where(f =>
         {
             if (blacklist.Contains(f.FormKey)) return false;   // global veto
@@ -588,14 +610,17 @@ static class Serve
         .Select(f => OvFor(f.Source).TryGetValue(f.FormKey, out var a)
                      && !a.Equals(f.PoolRace, StringComparison.OrdinalIgnoreCase) && RaceCompat.AreCompatible(f.PoolRace, a)
                      ? f with { As = a } : f)
+        .Select(f => SvFor(f.Source).TryGetValue(f.FormKey, out var r)
+                     && !r.Equals(f.PoolRace, StringComparison.OrdinalIgnoreCase)
+                     ? f with { Serve = r } : f)
         .ToList();
     }
 
-    record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race, string? Sex);
+    record FaceEntryReq(string? Key, string? As, string? EditorID, string? Race, string? Sex, string? Serve = null);
     record SaveWhitelistReq(string? Plugin, List<FaceEntryReq>? Faces, bool Remove = false);
     record SaveBlacklistReq(List<FaceEntryReq>? Npcs);
 
-    static Library.FaceEntry ToEntry(FaceEntryReq r) => new() { Key = r.Key ?? "", As = r.As, EditorID = r.EditorID, Race = r.Race, Sex = r.Sex };
+    static Library.FaceEntry ToEntry(FaceEntryReq r) => new() { Key = r.Key ?? "", As = r.As, Serve = r.Serve, EditorID = r.EditorID, Race = r.Race, Sex = r.Sex };
 
     static void HandleSaveWhitelist(HttpListenerContext ctx)
     {

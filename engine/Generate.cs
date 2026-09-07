@@ -71,13 +71,21 @@ static class Generate
                                   StringComparer.OrdinalIgnoreCase)
             : null;
 
-        // Race merger (library `as:`): faceId -> an ADDITIONAL race the face also serves (double-dip). The
-        // face still serves its own race; this adds a compat-group OVERLAY bucket (see pooling below), so a
-        // pretty Imperial face can also cover ImperialRaceVampire slots WITHOUT de-vampiring them.
-        var raceOverride = raceOverridePath is not null && File.Exists(raceOverridePath)
-            ? File.ReadAllLines(raceOverridePath).Select(l => l.Split('\t')).Where(p => p.Length == 2 && p[0].Length > 0 && p[1].Length > 0)
-                  .GroupBy(p => p[0].Trim(), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First()[1].Trim(), StringComparer.OrdinalIgnoreCase)
-            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Race merger (library `as:` / `serve:`): faceId -> ADDITIONAL races the face also serves, and HOW:
+        //   overlay (`as:`)    — compat-group double-dip: the target KEEPS its race (a vampire stays a vampire)
+        //                        and wears this head-compatible face. Compat-guarded at pooling.
+        //   adopt   (`serve:`) — a CUSTOM-race face (unreachable on its own: it pools under a hex race no
+        //                        vanilla slot ever draws) pooled under a vanilla race; the target then ADOPTS
+        //                        the face's own race, keeping the author's custom skin/head — the same
+        //                        mechanism the ja-Kha'jay breeds use. The face's source must stay enabled.
+        // TSV: faceId<TAB>race[<TAB>adopt] — no third column means overlay (back-compat with older callers).
+        var raceOverride = new Dictionary<string, List<(string race, bool adopt)>>(StringComparer.OrdinalIgnoreCase);
+        if (raceOverridePath is not null && File.Exists(raceOverridePath))
+            foreach (var p in File.ReadAllLines(raceOverridePath).Select(l => l.Split('\t')).Where(p => p.Length >= 2 && p[0].Trim().Length > 0 && p[1].Trim().Length > 0))
+            {
+                if (!raceOverride.TryGetValue(p[0].Trim(), out var lst)) raceOverride[p[0].Trim()] = lst = new();
+                lst.Add((p[1].Trim(), p.Length > 2 && p[2].Trim().Equals("adopt", StringComparison.OrdinalIgnoreCase)));
+            }
 
         var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
         var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
@@ -137,6 +145,7 @@ static class Generate
         var srcRec = new Dictionary<FormKey, (IMajorRecordGetter rec, string folder)>();
         var assets = new Dictionary<string, SourceAssets>(StringComparer.OrdinalIgnoreCase); // folder -> loose+BSA resolver
         var srcModes = new List<(string plugin, string mode, string why)>();
+        var disabledKeys = new HashSet<ModKey>();   // disable/standalone sources — a per-NPC skin (WNAM) living there can't be carried
 
         foreach (var (sp, forced) in srcSpecs)
         {
@@ -153,6 +162,7 @@ static class Generate
 
             if (disable)
             {
+                disabledKeys.Add(sm.ModKey);
                 if (unpack) unpackFolders.Add(folder);
                 // INDEX the source's own head-related records (cheap — just references). We deep-copy ONLY
                 // the closure an assigned face actually reaches, post-assignment — not every record the
@@ -179,19 +189,27 @@ static class Generate
                     l.Add(new Face(n, folder, disable, Fem(n), overlay));
                 }
                 Pool(r, false);   // native bucket (own race) — assignment adopts the face's race as before
-                // Merger double-dip: ALSO pool as the saved `as:` race, but ONLY if it's head-compatible
-                // (same race_compat group). That draw is an OVERLAY — the target keeps ITS race (a vampire
-                // stays a vampire) and wears this face; enforced compatible so the head/skin still match.
-                if (raceOverride.TryGetValue(Faces.FaceId(sp, n.FormKey), out var ov) && ov.Length > 0
-                    && !ov.Equals(r, StringComparison.OrdinalIgnoreCase) && RaceCompat.AreCompatible(r, ov))
-                    Pool(ov, true);
+                // Merger: ALSO pool under each saved extra race.
+                //  - `as:` (overlay) ONLY if head-compatible (same race_compat group): the target keeps ITS race
+                //    (a vampire stays a vampire) and wears this face; enforced so head/skin still match.
+                //  - `serve:` (adopt) is a NATIVE-style bucket: drawn from a vanilla slot, the target adopts this
+                //    face's (custom) race exactly like a same-race native draw would — no compat guard needed,
+                //    the NPC becomes a consistent whole (race + skin + head all the face's own).
+                if (raceOverride.TryGetValue(Faces.FaceId(sp, n.FormKey), out var ovs))
+                    foreach (var (ov, adopt) in ovs)
+                    {
+                        if (ov.Equals(r, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (adopt) Pool(ov, false);
+                        else if (RaceCompat.AreCompatible(r, ov)) Pool(ov, true);
+                    }
             }
         }
         // (RemapLinks deferred: we copy only the WORN source HDPTs after assignment, then remap.)
 
         var cursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var report = new Dictionary<string, (int assigned, int skipped, int faces)>(StringComparer.OrdinalIgnoreCase);
-        int femCount = 0, unmappedVoice = 0;
+        int femCount = 0, unmappedVoice = 0, raceSwitched = 0;   // raceSwitched: targets that ADOPT the face's race (native/adopt draw, face race != target race; `race=` in runtime mode)
+        int skinCarried = 0, skinDropped = 0;                    // per-NPC skin (WNAM) carried from the face's author / dropped (lives in a disabled source)
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
         var femRace = new Dictionary<(string plugin, uint id), string>();      // FINAL in-game race of a feminized male (for race-based heights)
         var runtimeTargets = new List<((string plugin, uint id) key, List<string> ops)>();   // SkyPatcher runtime mode: per-target base ops, in assignment order
@@ -237,7 +255,18 @@ static class Generate
             // Native draw: adopt the face's race (custom breeds for khajiit; no-op same-race). Overlay draw
             // (compat double-dip): KEEP the target's race so a vampire stays a vampire — the head is
             // group-compatible, and the target's race supplies its own skin/normal/eyes.
-            if (!keepRace) npc.Race.SetTo(s.Race.FormKey);
+            if (!keepRace) { if (npc.Race.FormKey != s.Race.FormKey) raceSwitched++; npc.Race.SetTo(s.Race.FormKey); }
+            // Per-NPC skin (WNAM): the author's body for THIS face — e.g. CS_Foundation puts a CS_Visions body on
+            // 300/301 of its NPCs, which the user's hand-written SkyPatcher lines carried as `skin=`. Carried on
+            // every draw, incl. an overlay (the vampire target keeps its race for eyes/face but wears the face's
+            // body; assumes the body's ARMA covers the vampire race, as vanilla + BodySlide bodies do). Skipped
+            // only when the ARMO lives in a DISABLED source (copying the link would pin that esp as a master —
+            // its ARMO/ARMA/meshes aren't deep-copied); counted so the summary says so.
+            if (!s.WornArmor.IsNull)
+            {
+                if (disabledKeys.Contains(s.WornArmor.FormKey.ModKey)) skinDropped++;
+                else { npc.WornArmor.SetTo(s.WornArmor.FormKey); skinCarried++; }
+            }
             npc.HeadParts.Clear();
             // Link to the ORIGINAL source FormKey; for a disable face the deferred deep-copy below copies
             // the reached records and RemapLinks redirects these to our copies. Keep faces stay as-is.
@@ -294,14 +323,34 @@ static class Generate
                 // look at load time is whatever wins your load order — sources must stay ENABLED.
                 var d = face.Npc.FormKey;
                 var baseOps = new List<string> { $"copyVisualStyle={d.ModKey.FileName}|{d.ID:X}" };
+                // Race must match the donor or the game can crash (SkyPatcher doc: "gender and race also match —
+                // those can also be modified with SkyPatcher"). A NATIVE draw adopts the donor's race exactly as
+                // ESP mode does (custom khajiit breeds etc.) via `race=`; an OVERLAY draw keeps the target's race by
+                // design (head-compat group, e.g. base<->vampire) and emits nothing. Same race -> nothing.
+                if (!face.Overlay && face.Npc.Race.FormKey != t.Race.FormKey)
+                {
+                    var rk = face.Npc.Race.FormKey;
+                    baseOps.Add($"race={rk.ModKey.FileName}|{rk.ID:X}");
+                    raceSwitched++;
+                }
+                // Per-NPC skin (WNAM): copyVisualStyle copies face+hair only, so the author's body for this face
+                // (CS_Foundation -> CS_Visions body) needs its own `skin=` op — the line the user's hand-made
+                // configs carried. Same every-draw rule as ESP mode (see ApplyFaceFields).
+                if (!face.Npc.WornArmor.IsNull && face.Npc.WornArmor.FormKey != t.WornArmor.FormKey)
+                {
+                    var wk = face.Npc.WornArmor.FormKey;
+                    baseOps.Add($"skin={wk.ModKey.FileName}|{wk.ID:X}");
+                    skinCarried++;
+                }
                 if (feminize && !Fem(t))
                 {
                     baseOps.Add("setFlags=female");
                     if (TryFemVoice(t.Voice.FormKey, race, t.FormKey.ID, out var rv)) baseOps.Add($"voiceType={rv.ModKey.FileName}|{rv.ID:X}"); else unmappedVoice++;
                     femCount++;
                     feminizedNpcs.Add((t.FormKey.ModKey.FileName, t.FormKey.ID, t.Name?.String ?? ""));
-                    // copyVisualStyle does NOT change race (doc: "gender and race should match") -> the target keeps its own
-                    femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = race;
+                    // FINAL race, same as ESP mode: an overlay keeps the target's; a native/adopt draw takes the face's
+                    // (via race= above) — a custom race resolves to hex -> the default feminine height.
+                    femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = face.Overlay ? race : RaceOf(face.Npc.Race.FormKey);
                 }
                 runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps));
                 continue;
@@ -477,7 +526,7 @@ static class Generate
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
         if (skypatcher)
-            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled).");
+            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled); {raceSwitched} adopt the donor's race via race=; {skinCarried} carry the donor's per-NPC skin via skin=.");
         else
         {
             outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
@@ -489,6 +538,10 @@ static class Generate
         Console.WriteLine("Source classification:");
         foreach (var (plugin, mode, why) in srcModes) Console.WriteLine($"  [{mode.ToUpperInvariant(),7}] {plugin}  — {why}");
         Console.WriteLine($"\nGenerated {outName}: {totalAssigned} overrides ({femCount} feminized), {outMod.HeadParts.Count} HDPT copied.");
+        if (!skypatcher && raceSwitched > 0) Console.WriteLine($"Race: {raceSwitched} NPCs adopt their face's race (custom breed/follower race — that source stays a master).");
+        if (skinCarried + skinDropped > 0)
+            Console.WriteLine($"Per-NPC skin (WNAM): {skinCarried} NPCs carry their face's author-set body skin"
+                              + (skinDropped > 0 ? $"; {skinDropped} DROPPED — the skin record lives in a disabled source (use keep or runtime mode to carry it)." : "."));
         Console.WriteLine($"{"Race",-14}{"assigned",10}{"skipped",9}{"faces",7}");
         foreach (var kv in report.OrderBy(k => k.Key))
             Console.WriteLine($"{kv.Key,-14}{kv.Value.assigned,10}{kv.Value.skipped,9}{kv.Value.faces,7}");
@@ -648,12 +701,18 @@ static class Generate
         rd.Append($"Category: {category}.  {totalAssigned} faces ({femCount} feminized males), {totalSkipped} skipped.\n");
         if (skypatcher)
             rd.Append($"Output type: SKYPATCHER RUNTIME — no plugin written. {runtimeTargets.Count} targets get their face at load via\n"
-                    + "  copyVisualStyle (+ setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
+                    + $"  copyVisualStyle (+ race= when the donor's race differs — {raceSwitched} here; + skin= when the donor has an\n"
+                    + $"  author-set body skin — {skinCarried} here; + setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
                     + "  mod must stay ENABLED (their NPC records + FaceGen are used directly). No NPC record overrides are written,\n"
                     + "  so this coexists with other mods that edit the same NPCs. An override-sourced face copies that NPC's look\n"
                     + "  as it wins YOUR load order.\n");
         else
+        {
             rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
+            if (raceSwitched > 0) rd.Append($"Race: {raceSwitched} NPCs adopt their face's race (a custom breed or follower race) — that race's mod is a master above.\n");
+            if (skinCarried > 0) rd.Append($"Skin: {skinCarried} NPCs carry the body skin their face's author set (per-NPC WNAM) — its mod is a master above.\n");
+            if (skinDropped > 0) rd.Append($"Skin: {skinDropped} NPCs LOST their face's author-set body skin (the skin record lives in a disabled source; use keep or runtime mode to carry it).\n");
+        }
         if (bakeTextures)
             rd.Append($"Textures: BAKED — {bakedCrossMod} cross-mod face textures (brows/eyes/hair from other packs)\n"
                     + "  are copied into THIS mod; only shared skin/body is left to its overhaul.\n");

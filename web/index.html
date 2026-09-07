@@ -214,7 +214,7 @@ window.addEventListener('unhandledrejection',function(ev){
             <th style="width:26px"></th><th class="libcol thumbcol"></th><th data-k="editorID">Face (EditorID)</th>
             <th data-k="sex" style="width:34px">Sex</th>
             <th data-k="poolRace">Race</th>
-            <th class="libcol" title="ALSO generate this face for a head-compatible race (its vampire variant). Double-dip: the face keeps serving its own race too, and the vampire target stays a vampire — it just wears this face.">Also</th>
+            <th class="libcol" title="Vanilla-race face: ALSO generate it for a head-compatible race (its vampire variant) — double-dip, the vampire target stays a vampire and just wears this face. Custom-race face (◆, no vanilla slot can draw it): pick the vanilla race whose slots it should fill — the NPC then ADOPTS the face's own race, keeping the author's skin; that source mod must stay enabled.">Also / Serve</th>
             <th data-k="source">Source</th>
             <th class="libcol" style="width:30px" title="blacklist across all mods">⛔</th>
           </tr></thead>
@@ -377,7 +377,7 @@ async function api(p,o){
   catch(e){ throw new Error('non-JSON from '+p+': '+txt.slice(0,300)); }
 }
 const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), demand:[], boostInfo:{boostable:false,lists:0}, sexplague:null, femnames:null, autoName:true, lastAudit:null, sortK:null, sortDir:1,
-  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{}, raceAs:{}, compat:{},
+  mode:'creator', blacklist:new Set(), blMeta:{}, blLoaded:false, wl:{}, raceAs:{}, raceServe:{}, compat:{}, serveRaces:[],
   mugshotMods:[], mugshotAliases:{}, msVer:0 };
 
 // ---------- boot ----------
@@ -435,6 +435,7 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
   await setupFemNames();
   await setupFemHeights();
   try { state.compat = await api('/api/race-compat'); } catch { state.compat = {}; }
+  try { state.serveRaces = await api('/api/serve-races'); } catch { state.serveRaces = []; }
   await onCategory();
   await scanMods();
  } catch(e){ window.__err('BOOT FAILED: '+(e&&e.stack?e.stack:e)); }
@@ -509,6 +510,7 @@ async function saveSettings(){
     if($('#profilesPath')) $('#profilesPath').textContent = r.profiles ? ('profiles (auto): '+winPath(r.profiles)) : '';
     if(r.gameData) $('#gameDataInput').value = winPath(r.gameData);
     try { state.compat = await api('/api/race-compat'); } catch {}  // compat groups depend on the config
+    try { state.serveRaces = await api('/api/serve-races'); } catch {}  // playable races come from the game esm
     await onCategory();   // re-read demand/boostinfo against the new game + version
     await scanMods();     // re-scan mods with the new mods/profile
   }catch(e){ note.textContent='✘ '+(e&&e.message?e.message:e); }
@@ -689,8 +691,17 @@ window.setMugshotAlias = async function(sourceMod, folder){
 // ---------- faces ----------
 // A face is "usable" for the current category if its race is one the category actually has targets in,
 // and its gender can be assigned (feminize on -> female faces only; off -> gender-matched to a target).
-// Every race a face can fill: its own, plus its library double-dip (`as`) — mirrors the engine's two Pool() calls.
-function servedRaces(f){ return (f.as && f.as!==f.poolRace) ? [f.poolRace, f.as] : [f.poolRace]; }
+// Every race a face can fill: its own, plus its library double-dip (`as`, overlay) and its adopt race (`serve`,
+// a custom-race face pooled under a vanilla race) — mirrors the engine's Pool() calls.
+function servedRaces(f){
+  const r=[f.poolRace];
+  if(f.as && f.as!==f.poolRace) r.push(f.as);
+  if(f.serve && f.serve!==f.poolRace) r.push(f.serve);
+  return r;
+}
+// A face whose pool race is a hex FormKey (a race not in the game esm — custom follower race, or a DLC race on a
+// trimmed esm) can't be drawn by any vanilla slot on its own: that's exactly what the `serve:` selector is for.
+function unreachable(f){ return /:/.test(f.poolRace||''); }
 function faceUsable(f){
   const fem = $('#feminize') ? $('#feminize').checked : true;
   for(const r of servedRaces(f)){
@@ -736,6 +747,7 @@ async function ensureWhitelists(){
     try{ const r = await api('/api/library/mod?plugin='+encodeURIComponent(s.plugin));
       state.wl[s.plugin] = r.hasWhitelist ? new Set(r.keys) : null;
       if(r.overrides) for(const [k,race] of Object.entries(r.overrides)) state.raceAs[s.plugin+'#'+k]=race; // preload merger picks
+      if(r.serves) for(const [k,race] of Object.entries(r.serves)) state.raceServe[s.plugin+'#'+k]=race;   // preload adopt picks
     }catch{ state.wl[s.plugin] = null; }
   }
 }
@@ -777,10 +789,14 @@ function renderFaces(){
     const cls = [dim, bl?'blacklisted':''].filter(Boolean).join(' ');
     const ttl = lib ? '' : (faceUsable(f)?'':'not used by this category (wrong race/gender)');
     const thumb = lib ? `<td class="libcol thumbcol">${thumbHtml(f)}</td>` : '';
-    const asVal = state.raceAs[f.id]||'';
+    const asVal = state.raceAs[f.id]||'', svVal = state.raceServe[f.id]||'';
     const compatOthers = (state.compat && state.compat[f.poolRace]) || [];
+    // Library "Also" cell: a vanilla-race face gets its head-compatible OVERLAY pick (vampire variant); a face no
+    // vanilla slot can reach (custom race) gets the ADOPT pick instead — which vanilla race it should serve.
     const ascell = lib ? `<td class="libcol">${compatOthers.length
         ? `<select class="asSel${asVal?' asSet':''}" title="also generate this face for its vampire variant — it keeps that race, just wears this face" onchange="setRaceAs('${jsq(f.id)}',this.value)">${raceOptions(asVal, compatOthers)}</select>`
+        : (unreachable(f) && state.serveRaces.length)
+        ? `<select class="asSel${svVal?' asSet':''}" title="custom race (${esc(f.npcRace)}): no vanilla slot draws it on its own. Pick the vanilla race whose slots it should fill — the NPC then ADOPTS this face's race (keeps the author's skin/head). The source mod must stay enabled." onchange="setRaceServe('${jsq(f.id)}',this.value)">${raceOptions(svVal, state.serveRaces, 'serve as…')}</select>`
         : '<span class="muted" title="no head-compatible race for this one">—</span>'}</td>` : '';
     const blcell = lib ? `<td class="libcol" style="text-align:center"><button class="blbtn ${bl?'on':''}" title="${bl?'blacklisted everywhere — click to remove':'blacklist this NPC across ALL mods'}" onclick="togBlack('${jsq(f.formKey)}','${jsq(f.editorID||'')}','${jsq(f.poolRace||'')}')">⛔</button></td>` : '';
     return `<tr class="${cls}" title="${esc(ttl)}">
@@ -788,7 +804,7 @@ function renderFaces(){
       ${thumb}
       <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
       <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
-      <td>${esc(f.poolRace)}${(!lib && f.as) ? ` <span class="muted" title="library double-dip: also serves ${esc(f.as)}">+${esc(shortRace(f.as))}</span>` : ''}</td>
+      <td>${esc(f.poolRace)}${(!lib && f.as) ? ` <span class="muted" title="library double-dip: also serves ${esc(f.as)}">+${esc(shortRace(f.as))}</span>` : ''}${(!lib && f.serve) ? ` <span class="muted" title="library adopt: fills ${esc(f.serve)} slots; the NPC becomes this face's race">→${esc(shortRace(f.serve))}</span>` : ''}</td>
       ${ascell}
       <td class="muted" title="${esc(f.source)}">${esc(f.source.replace(/\.esp$/i,''))}</td>
       ${blcell}
@@ -811,8 +827,8 @@ window.thumbFail = function(img){ img.onerror=null; const d=document.createEleme
 
 // "also serve" dropdown: double-dip this face onto a head-compatible race (its vampire variant). The face
 // still serves its own race; the target of the chosen race keeps ITS race and just wears this face.
-function raceOptions(sel, others){
-  const opts = ['<option value="">(none)</option>'];
+function raceOptions(sel, others, none){
+  const opts = [`<option value="">${esc(none||'(none)')}</option>`];
   for(const r of (others||[])) opts.push(`<option value="${esc(r)}" ${r===sel?'selected':''}>${esc(r)}</option>`);
   return opts.join('');
 }
@@ -820,6 +836,14 @@ window.setRaceAs = function(id, race){
   const f = state.faces.find(x=>x.id===id);
   if(!race || (f && race===f.poolRace)) delete state.raceAs[id];
   else { state.raceAs[id]=race; if(f) state.selected.add(id); } // "also serve" implies you want the face in
+  renderFaces(); renderLibSummary();
+};
+// "serve as" (adopt) for a custom-race face: pooled under the chosen vanilla race; the target NPC adopts the
+// face's own race. Saved as `serve:` in the whitelist. Picking one implies you want the face in.
+window.setRaceServe = function(id, race){
+  const f = state.faces.find(x=>x.id===id);
+  if(!race || (f && race===f.poolRace)) delete state.raceServe[id];
+  else { state.raceServe[id]=race; if(f) state.selected.add(id); }
   renderFaces(); renderLibSummary();
 };
 
@@ -1157,7 +1181,7 @@ async function saveLibrary(){
   const results=[];
   for(const s of state.sources){
     const faces = state.faces.filter(f=>f.source===s.plugin && state.selected.has(f.id))
-      .map(f=>({key:f.formKey, as:(state.raceAs[f.id]||null), editorID:f.editorID, race:f.poolRace, sex:f.sex}));
+      .map(f=>({key:f.formKey, as:(state.raceAs[f.id]||null), serve:(state.raceServe[f.id]||null), editorID:f.editorID, race:f.poolRace, sex:f.sex}));
     try{ const r = await api('/api/library/mod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({plugin:s.plugin, faces})});
       state.wl[s.plugin] = new Set(faces.map(f=>f.key));
       results.push(`✔ ${s.plugin}: ${r.count} face${r.count===1?'':'s'} whitelisted`);
