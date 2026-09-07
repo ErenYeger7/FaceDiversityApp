@@ -1,0 +1,15 @@
+# Feminine height multipliers, applied via SkyPatcher `height=` to every feminized male (a male
+# target the app flipped female), by the NPC's FINAL in-game race.
+#
+# Rules:
+#   - A vampire race uses its BASE race's value in all cases (NordRaceVampire -> NordRace).
+#   - Any race not listed under `heights` uses `default` (mod-added / custom races included).
+#   - Keys are race EditorIDs. Values are multipliers of the race's normal height (1.00 = unchanged).
+#
+# Edit freely — the app reads this file on every generate (no restart needed).
+default: 0.87
+heights:
+  HighElfRace: 0.95
+  OrcRace: 0.93
+  NordRace: 0.90
+  ArgonianRace: 0.90

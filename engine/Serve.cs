@@ -228,6 +228,16 @@ static class Serve
                     int n = File.Exists(p) ? FeminineNames.Load(p).Count : 0;
                     Send(ctx, 200, "application/json", Json(new { available = File.Exists(p), count = n })); return;
                 }
+                case "/api/femheights":
+                {
+                    var fh = FeminineHeights.Load(FeminineHeightsPath());   // null if the yaml is missing/invalid
+                    Send(ctx, 200, "application/json", Json(new
+                    {
+                        available = fh is not null, races = fh?.Heights.Count ?? 0,
+                        defaultHeight = fh is null ? "" : fh.Default.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+                        heights = fh?.Heights
+                    })); return;
+                }
                 case "/api/audit":
                 {
                     var m = q["mod"];
@@ -423,9 +433,10 @@ static class Serve
     record GenSource(string Path, string? Mode);
     record GenReq(string? Category, List<GenSource>? Sources, List<string>? Include, string? Name, string? Out,
                   bool Feminize = true, bool Boost = false, bool Sexplague = false, List<int>? SexplaguePct = null,
-                  bool FeminineNames = false, bool BakeTextures = false);
+                  bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false);
 
     static string FeminineNamesPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_names.yaml");
+    static string FeminineHeightsPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_heights.yaml");
 
     static void HandleGenerate(HttpListenerContext ctx)
     {
@@ -468,6 +479,7 @@ static class Serve
             if (req.SexplaguePct is { Count: > 0 }) { a.Add("--sexplague-pct"); a.Add(string.Join(",", req.SexplaguePct)); }
         }
         if (req.FeminineNames && File.Exists(FeminineNamesPath())) { a.Add("--feminine-names"); a.Add(FeminineNamesPath()); }
+        if (req.FeminineHeights && File.Exists(FeminineHeightsPath())) { a.Add("--feminine-heights"); a.Add(FeminineHeightsPath()); }
         // Bake textures: hand the engine the enabled mod folders (MO2 priority) so it can resolve + bake
         // cross-mod face textures (brows/eyes) into a self-contained output.
         string? assetDirsFile = null;

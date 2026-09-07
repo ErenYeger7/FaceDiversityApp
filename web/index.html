@@ -305,6 +305,11 @@ window.addEventListener('unhandledrejection',function(ev){
       </label>
       <div class="muted hidden" id="fnDetail" style="margin:4px 0 0 23px"></div>
 
+      <label class="row" id="fhRow" style="margin-top:10px;gap:8px;cursor:pointer">
+        <input type="checkbox" id="femHeights">
+        <span>Apply feminine heights <span class="muted" id="fhNote"></span></span>
+      </label>
+
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
         <input type="checkbox" id="bakeTextures">
         <span>Bake textures (self-contained) <span class="muted">— copy each face's brow/eye textures from any mod so nothing renders purple; larger output, skin overhauls excluded</span></span>
@@ -423,6 +428,7 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
 
   await setupSexPlague();
   await setupFemNames();
+  await setupFemHeights();
   try { state.compat = await api('/api/race-compat'); } catch { state.compat = {}; }
   await onCategory();
   await scanMods();
@@ -451,6 +457,14 @@ async function setupFemNames(){
   if(!fn || !fn.available){ cb.checked=false; cb.disabled=true; $('#fnNote').textContent='(feminine_names.yaml not found)'; return; }
   $('#fnNote').textContent = `(${fn.count} names — editable in config/feminine_names.yaml)`;
   cb.onchange = ()=>{ $('#fnDetail').classList.toggle('hidden', !cb.checked); refreshName(); };
+}
+async function setupFemHeights(){
+  try { state.femheights = await api('/api/femheights'); } catch { state.femheights = {available:false}; }
+  const fh = state.femheights, cb = $('#femHeights');
+  if(!fh || !fh.available){ cb.checked=false; cb.disabled=true; $('#fhNote').textContent='(feminine_heights.yaml not found)'; return; }
+  const listed = Object.entries(fh.heights||{}).map(([r,v])=>`${shortRace(r)} ${Number(v).toFixed(2)}`).join(' · ');
+  $('#fhNote').textContent = `(race-based height= via SkyPatcher on feminized males — ${listed}; others ${fh.defaultHeight}; a vampire uses its base race — editable in config/feminine_heights.yaml)`;
+  cb.onchange = refreshName;
 }
 async function saveSettings(){
   const btn=$('#saveSettingsBtn'), note=$('#settingsSaved');
@@ -510,7 +524,8 @@ function autoName(){
   const ll  = $('#boost').checked && !$('#boost').disabled;
   const sp  = $('#sexplague').checked && !$('#sexplague').disabled;
   const fn  = $('#femNames').checked && !$('#femNames').disabled;
-  return 'FDA_'+groupToken()+(fem?'_F':'')+(ll?'_LL':'')+(sp?'_SP':'')+(fn?'_FN':'')+'.esp';
+  const fh  = $('#femHeights').checked && !$('#femHeights').disabled;
+  return 'FDA_'+groupToken()+(fem?'_F':'')+(ll?'_LL':'')+(sp?'_SP':'')+(fn?'_FN':'')+(fh?'_FH':'')+'.esp';
 }
 function refreshName(){ if(state.autoName!==false) $('#outName').value = autoName(); }
 // user edits -> stop auto; clear the field -> resume auto
@@ -958,6 +973,7 @@ $('#createBtn').onclick = async ()=>{
     sexplague: spOn,
     sexplaguePct: spOn ? spPcts() : null,
     feminineNames: $('#femNames').checked,
+    feminineHeights: $('#femHeights').checked,
     bakeTextures: $('#bakeTextures').checked
   };
   let res;

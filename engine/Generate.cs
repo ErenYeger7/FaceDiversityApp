@@ -29,9 +29,9 @@ static class Generate
     public static int Run(string[] args)
     {
         string? game = null, category = "bandit", voiceMapPath = null, outFolder = null, outName = null;
-        string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null;
+        string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null, feminineHeightsPath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
-        bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false;
+        bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false; bool feminineHeights = false;
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
@@ -52,6 +52,7 @@ static class Generate
                 case "--sexplague": sexplague = true; break;      // tag feminized males with SexPlague factions + ability
                 case "--sexplague-pct": sexplaguePct = args[++i]; break; // "60,30,10" tier split (overrides yaml)
                 case "--feminine-names": feminineNames = true; feminineNamesPath = args[++i]; break; // apply feminine fullName via SkyPatcher
+                case "--feminine-heights": feminineHeights = true; feminineHeightsPath = args[++i]; break; // race-based height= op per feminized male via SkyPatcher (feminine_heights.yaml)
                 case "--bake-textures": bakeTextures = true; break;   // bake cross-mod face textures (brows/eyes/etc.) for self-contained output
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
                 case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
@@ -189,6 +190,7 @@ static class Generate
         var report = new Dictionary<string, (int assigned, int skipped, int faces)>(StringComparer.OrdinalIgnoreCase);
         int femCount = 0, unmappedVoice = 0;
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
+        var femRace = new Dictionary<(string plugin, uint id), string>();      // FINAL in-game race of a feminized male (for race-based heights)
         var missingFaceGen = new List<string>();
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -290,6 +292,7 @@ static class Generate
                 if (TryFemVoice(t.Voice.FormKey, race, t.FormKey.ID, out var fvk)) npc.Voice.SetTo(fvk); else unmappedVoice++;
                 femCount++;
                 feminizedNpcs.Add((t.FormKey.ModKey.FileName, t.FormKey.ID, t.Name?.String ?? ""));
+                femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = RaceOf(npc.Race.FormKey);   // FINAL race (an overlay draw keeps the target's)
             }
 
             // FaceGen lives under the folder named for the record's origin plugin — the game looks under
@@ -363,6 +366,7 @@ static class Generate
                         clone.Configuration.Flags |= NpcConfiguration.Flag.Female;
                         if (TryFemVoice(donor.Voice.FormKey, race, fk.ID, out var fvk)) clone.Voice.SetTo(fvk); else unmappedVoice++;
                         feminizedNpcs.Add((outName, fk.ID, donor.Name?.String ?? ""));
+                        femRace[(outName, fk.ID)] = RaceOf(clone.Race.FormKey);   // clone's FINAL race (adopted from the face) -> feminine height
                     }
                     clone.EditorID = $"FDA{ShortRace(race)}{(female ? "F" : "M")}{seq++:D3}";
                     var fg = CopyFaceGen(assets[face.Folder], face.Npc.FormKey.ModKey.FileName, face.Npc.FormKey.ID, fk.ID, outFolder, outName);
@@ -484,7 +488,7 @@ static class Generate
         // ---- Unified SkyPatcher NPC config: for each feminized male, optionally SexPlague tier/seed/
         // ability ops AND a feminine fullName, emitted as ONE `filterByNpcs=...` line each in
         // <stem>_npc.ini (runtime; no master dep on SexPlagueFactions.esp, no ESP name edit).
-        string? npcIni = null; int spTagged = 0; string spSummary = ""; int renamed = 0; bool femNamesOn = false;
+        string? npcIni = null; int spTagged = 0; string spSummary = ""; int renamed = 0; bool femNamesOn = false; int heighted = 0; bool femHeightsOn = false;
         {
             // SexPlague tier op per NPC (deterministic spread across the population, not in blocks)
             var sexOp = new Dictionary<(string plugin, uint id), string>();
@@ -521,12 +525,21 @@ static class Generate
             var femNameMap = feminineNames ? FeminineNames.Load(feminineNamesPath) : null;
             femNamesOn = femNameMap is not null;
 
+            // Feminine height op per NPC by FINAL race (vampire -> base race; unlisted -> default), from feminine_heights.yaml.
+            var femHeights = feminineHeights ? FeminineHeights.Load(feminineHeightsPath) : null;
+            femHeightsOn = femHeights is not null;
+            if (feminineHeights && femHeights is null) Console.WriteLine("\nFeminine heights: enabled but feminine_heights.yaml not found/invalid — skipped.");
+
             // One line per NPC that carries at least one op (SkyPatcher merges multiple : ops per NPC).
             var npcLines = new List<string>();
             foreach (var f in feminizedNpcs)
             {
                 var ops = new List<string>();
                 if (sexOp.TryGetValue((f.plugin, f.id), out var so)) ops.Add(so);
+                // height= before fullName (fullName must stay LAST — its spaces run to end of line). Invariant
+                // culture: a comma decimal from a pt-BR/DE locale would silently break SkyPatcher's parse.
+                if (femHeights is not null && femRace.TryGetValue((f.plugin, f.id), out var fr))
+                { ops.Add("height=" + femHeights.For(fr).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)); heighted++; }
                 if (femNameMap is not null && !string.IsNullOrEmpty(f.name)
                     && femNameMap.TryGetValue(f.name, out var fn)) { ops.Add($"fullName={fn}"); renamed++; }
                 if (ops.Count == 0) continue;
@@ -548,6 +561,8 @@ static class Generate
                 Console.WriteLine($"\nSexPlague: {spTagged} feminized males tagged ({spSummary}) + seed {sp.SeedFaction} + ability {sp.ControllerSpell}.");
             if (femNamesOn)
                 Console.WriteLine($"Feminine names: {renamed} of {feminizedNpcs.Count} feminized males renamed ({femNameMap!.Count} map entries).");
+            if (femHeightsOn)
+                Console.WriteLine($"Feminine heights: {heighted} of {feminizedNpcs.Count} feminized males scaled by race ({femHeights!.Heights.Count} races listed, default {femHeights.Default.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}).");
             if (npcIni is not null) Console.WriteLine($"  wrote SkyPatcher NPC config: {npcIni}");
         }
 
@@ -606,6 +621,7 @@ static class Generate
             rd.Append($"\nSKYPATCHER NPC CONFIG (SKSE/Plugins/SkyPatcher/npc/{Path.GetFileNameWithoutExtension(outName)}_npc.ini) — REQUIRES SkyPatcher enabled:\n");
             if (spTagged > 0) rd.Append($"  - SexPlague: {spTagged} feminized males tagged ({spSummary}) — REQUIRES SexPlagueFactions.esp.\n");
             if (femNamesOn) rd.Append($"  - Feminine names: {renamed} feminized males given a feminine display name.\n");
+            if (femHeightsOn && heighted > 0) rd.Append($"  - Feminine heights: {heighted} feminized males scaled by race via height= (config/feminine_heights.yaml; a vampire uses its base race's value).\n");
         }
         if (missingFaceGen.Count > 0)
             rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
