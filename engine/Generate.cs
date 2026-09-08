@@ -131,6 +131,10 @@ static class Generate
                 .Where(n => Categories.MatchesPrefix(n.EditorID ?? "", prefix) && OwnTraits(n) && AdultHumanoid(n))
                 .ToList();
         }
+        // Belt and braces for EVERY target shape: the player's own record and the character-gen face
+        // presets are never refaced/feminized (the scan already drops them; no future category may reach them).
+        int playerDropped = targets.RemoveAll(LoadOrderScan.IsPlayerOrPreset);
+        if (playerDropped > 0) Console.WriteLine($"Excluded {playerDropped} player/chargen-preset record(s) from the targets.");
 
         // Build as a full ESP (new FormKeys still allocate from 0x800). The ESL/ESPFE flag is decided once
         // at the very end from the ACTUAL new-record count — an ESPFE holds only 0x800–0xFFF (2048) new
@@ -210,6 +214,7 @@ static class Generate
         var report = new Dictionary<string, (int assigned, int skipped, int faces)>(StringComparer.OrdinalIgnoreCase);
         int femCount = 0, unmappedVoice = 0, raceSwitched = 0;   // raceSwitched: targets that ADOPT the face's race (native/adopt draw, face race != target race; `race=` in runtime mode)
         int skinCarried = 0, skinDropped = 0;                    // per-NPC skin (WNAM) carried from the face's author / dropped (lives in a disabled source)
+        int weightMatched = 0;                                   // runtime-mode `weight=` ops (target weight set to the donor's so head and body meet)
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
         var femRace = new Dictionary<(string plugin, uint id), string>();      // FINAL in-game race of a feminized male (for race-based heights)
         var runtimeTargets = new List<((string plugin, uint id) key, List<string> ops)>();   // SkyPatcher runtime mode: per-target base ops, in assignment order
@@ -341,6 +346,14 @@ static class Generate
                     var wk = face.Npc.WornArmor.FormKey;
                     baseOps.Add($"skin={wk.ModKey.FileName}|{wk.ID:X}");
                     skinCarried++;
+                }
+                // WEIGHT: the face renders from the donor's FaceGen, baked at the DONOR's weight, while the body is
+                // built at the TARGET's weight — any gap between the two is a neck seam. ESP mode copies Weight in
+                // ApplyFaceFields; runtime mode must say so explicitly (89% of bandit lines differed, median 35).
+                if (Math.Abs(face.Npc.Weight - t.Weight) > 0.01f)
+                {
+                    baseOps.Add("weight=" + face.Npc.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                    weightMatched++;
                 }
                 if (feminize && !Fem(t))
                 {
@@ -526,7 +539,7 @@ static class Generate
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
         if (skypatcher)
-            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled); {raceSwitched} adopt the donor's race via race=; {skinCarried} carry the donor's per-NPC skin via skin=.");
+            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled); {raceSwitched} adopt the donor's race via race=; {skinCarried} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
         else
         {
             outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
@@ -702,7 +715,8 @@ static class Generate
         if (skypatcher)
             rd.Append($"Output type: SKYPATCHER RUNTIME — no plugin written. {runtimeTargets.Count} targets get their face at load via\n"
                     + $"  copyVisualStyle (+ race= when the donor's race differs — {raceSwitched} here; + skin= when the donor has an\n"
-                    + $"  author-set body skin — {skinCarried} here; + setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
+                    + $"  author-set body skin — {skinCarried} here; + weight= so the body is built at the weight the donor's FaceGen was\n"
+                    + $"  baked at — {weightMatched} here, a neck seam otherwise; + setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
                     + "  mod must stay ENABLED (their NPC records + FaceGen are used directly). No NPC record overrides are written,\n"
                     + "  so this coexists with other mods that edit the same NPCs. An override-sourced face copies that NPC's look\n"
                     + "  as it wins YOUR load order.\n");

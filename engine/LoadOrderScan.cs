@@ -173,6 +173,13 @@ static class LoadOrderScan
         var res = new List<INpcGetter>();
         foreach (var n in lo.PriorityOrder.Npc().WinningOverrides())
         {
+            // The PLAYER's base record (Skyrim.esm 0x7 "Player"/"Prisoner") is a unique, named, own-traits
+            // male and passed every filter below — a build then flipped the player female, pinned a fixed
+            // face on them, tagged them with SexPlague and renamed them "Prisonera". Likewise the 100
+            // character-generation PRESET NPCs (NordMalePreset01…, ACBS "Is CharGen Face Preset") are
+            // Unique+named, so they were feminized too — which is why RaceMenu's male presets "did nothing".
+            // Neither is ever a target.
+            if (IsPlayerRecord(n) || IsChargenPreset(n)) continue;
             if (n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female)) continue;
             if (!n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Unique)) continue;
             if (n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !n.Template.IsNull) continue;
@@ -183,6 +190,15 @@ static class LoadOrderScan
         }
         return res;
     }
+
+    // Skyrim.esm 000007 is the player's own NPC record. Checked by FormKey (not EditorID) so an override
+    // that renames it still matches.
+    public static readonly FormKey PlayerFormKey = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x7);
+    public static bool IsPlayerRecord(INpcGetter n) => n.FormKey == PlayerFormKey;
+    // Character-creation face presets carry the ACBS "Is CharGen Face Preset" flag; a refaced preset shows
+    // up in RaceMenu's preset slider as the transplanted face.
+    public static bool IsChargenPreset(INpcGetter n) => n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.IsCharGenFacePreset);
+    public static bool IsPlayerOrPreset(INpcGetter n) => IsPlayerRecord(n) || IsChargenPreset(n);
 
     public static void DisposeLoadOrder(LoadOrder<IModListingGetter<ISkyrimModGetter>> lo)
     {
