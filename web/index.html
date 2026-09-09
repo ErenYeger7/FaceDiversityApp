@@ -429,6 +429,15 @@ const state = { config:null, mods:[], sources:[], faces:[], selected:new Set(), 
 (async function boot(){
  try {
   state.config = await api('/api/config');
+  // Page/server handshake: this page was written for one API level; an older server (still running from
+  // before a git pull / rebuild) answers with older payloads, which shows up as "undefined" and dead buttons.
+  const NEED_API = 4;
+  if((state.config.apiLevel||0) !== NEED_API){
+    const b=document.createElement('div'); b.className='warnbox';
+    b.style.cssText='position:sticky;top:0;z-index:50;margin:0;border-radius:0;background:rgba(255,96,96,.18);border-color:rgba(255,96,96,.6);color:#ffd1d1;padding:10px 14px;font-size:13px';
+    b.innerHTML = `<b>The running server is older than this page</b> (server API level ${state.config.apiLevel||'?'}, page needs ${NEED_API}). Close the “FaceDiversityApp UI” server window and run <code>run-ui.cmd</code> again so the engine is rebuilt and restarted — until then buttons may be disabled and values show as undefined.`;
+    document.body.prepend(b);
+  }
   $('#gamePath').textContent = winPath(state.config.game);
   const cat = $('#category'); cat.innerHTML='';
   for(const c of state.config.categories){
@@ -1262,20 +1271,28 @@ async function refreshLibBuilds(){
 // Which curated mods go into the next build (default: every installed one). Re-planned on every change via
 // the engine's dry run, so the ESPFE/ESP verdict is the build's own count.
 let planTimer=null, planSeq=0;
+// Two phases: the curated-mod list comes from the whitelists alone (instant) and renders first; the plan —
+// per-mod engine dry runs, cached server-side — follows and fills the projection when it lands.
 async function loadBuildPlan(){
-  const list=$('#buildPlugins'), proj=$('#buildProj'), races=$('#buildRaces');
+  const list=$('#buildPlugins'), proj=$('#buildProj');
   const first = !state.buildSel;
-  if(first) list.innerHTML='<div class="muted"><span class="spin"></span> reading curated mods…</div>';
-  proj.innerHTML='<div class="muted"><span class="spin"></span> projecting (engine dry run)…</div>';
+  if(first){
+    list.innerHTML='<div class="muted"><span class="spin"></span> reading curated mods…</div>';
+    let c; try{ c = await api('/api/library/curated'); }catch(e){ list.innerHTML=`<div class="warnbox">✘ ${esc(e&&e.message?e.message:e)}</div>`; return; }
+    state.buildSel = new Set(c.plugins.filter(p=>p.installed && p.faces>0).map(p=>p.plugin));
+    state.buildPlugins = c.plugins;
+    renderBuildPlugins(c);
+  }
+  const nMods=[...state.buildSel].length, t0=Date.now();
+  proj.innerHTML=`<div class="muted"><span class="spin"></span> planning the set: measuring ${nMods} mod${nMods===1?'':'s'} (engine dry runs — a mod is measured once per session, later re-plans are instant)…</div>`;
   const seq=++planSeq;
   let r;
-  try{ r = await api('/api/library/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ plugins: first ? null : [...state.buildSel], name:$('#libBuildName').value.trim()||null, repack:$('#libBuildRepack').checked })}); }
-  catch(e){ proj.innerHTML=`<div class="warnbox">✘ ${esc(e&&e.message?e.message:e)}</div>`; return; }
+  try{ r = await api('/api/library/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ plugins: [...state.buildSel], name:$('#libBuildName').value.trim()||null, repack:$('#libBuildRepack').checked })}); }
+  catch(e){ if(seq===planSeq) proj.innerHTML=`<div class="warnbox">✘ ${esc(e&&e.message?e.message:e)}</div>`; return; }
   if(seq!==planSeq) return;   // a newer plan is in flight
-  if(first) state.buildSel = new Set(r.plugins.filter(p=>p.installed && p.faces>0).map(p=>p.plugin));
   state.buildPlugins = r.plugins;
   renderBuildPlugins(r);
-  renderBuildProjection(r);
+  renderBuildProjection(r, Math.round((Date.now()-t0)/1000));
 }
 function renderBuildPlugins(r){
   const rows = r.plugins.map(p=>{
@@ -1291,20 +1308,25 @@ function renderBuildPlugins(r){
   const nSel=[...state.buildSel].length, nFaces=r.plugins.filter(p=>state.buildSel.has(p.plugin)).reduce((n,p)=>n+p.faces,0);
   $('#bsCount').textContent = `${nSel} mod${nSel===1?'':'s'} · ${nFaces} faces`;
 }
-function renderBuildProjection(r){
+function renderBuildProjection(r, secs){
   const proj=$('#buildProj'), races=$('#buildRaces'), qa=$('#buildQa');
   if(!r.plan){
     proj.innerHTML = r.error ? `<div class="warnbox">✘ ${esc(r.error)}</div>` : '<div class="muted">Nothing selected.</div>';
     races.innerHTML='<tr><td colspan="4" class="muted">—</td></tr>'; if(qa) qa.textContent='—'; $('#libBuildBtn').disabled=true; return;
   }
   const p=r.plan, plugins=p.plugins||[], allEsl = plugins.every(x=>x.esl);
-  const rows = plugins.map(x=>`<div style="margin:3px 0"><b>${esc(x.name)}</b> — ${x.faces} faces, <b>${x.records}</b> records → ${x.esl?'ESPFE':'FULL ESP'}`
+  if(p.totalFaces===undefined){   // pre-set server (old build still running): say so instead of "undefined"
+    proj.innerHTML = '<div class="warnbox">The running server is older than this page (its plan has no set layout). Close the server window and run run-ui.cmd again to rebuild + restart.</div>';
+    races.innerHTML='<tr><td colspan="4" class="muted">—</td></tr>'; if(qa) qa.textContent='—'; $('#libBuildBtn').disabled=true; return;
+  }
+  const rows = plugins.map(x=>`<div style="margin:3px 0"><b>${esc(x.name)}</b> — ${x.faces} faces, <b>${x.exact?'':'≤ '}${x.records}</b> records → ${x.esl?'ESPFE':'FULL ESP'}`
       + (x.newFaces?` <span class="muted">(+${x.newFaces} new)</span>`:'') + (x.reserved?` <span class="muted">· ${x.reserved} IDs pinned</span>`:'')
       + `<div class="muted" style="margin-left:10px">${esc(Object.entries(x.modFaces||{}).sort((a,b)=>b[1]-a[1]).map(([m,n])=>`${m.replace(/\.esp$/i,'')} ${n}`).join(' · '))}</div></div>`).join('');
   proj.innerHTML = `<div class="warnbox" style="${allEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
     + `Set <b>${esc(r.setName||'FDA_Library')}</b>: <b>${p.totalFaces}</b> faces in <b>${plugins.length}</b> plugin${plugins.length===1?'':'s'}`
     + (p.pinnedFaces?` · ${p.pinnedFaces} already placed (stable IDs)`:'') + (p.newFaces?` · <b>${p.newFaces}</b> new`:'') + (p.tombstones?` · ${p.tombstones} tombstones`:'')
     + (p.skipped&&p.skipped.length?` · <span style="color:#ffd9a3">${p.skipped.length} not built (QA)</span>`:'')
+    + (secs!==undefined?` <span class="muted">· planned in ${secs}s</span>`:'')
     + `${rows}`
     + (p.error?`<div class="warnbox" style="margin-top:6px">✘ ${esc(p.error)}</div>`:'')
     + `</div>`;

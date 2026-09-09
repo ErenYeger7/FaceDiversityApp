@@ -74,7 +74,8 @@ static class LibrarySet
 {
     public record ModInput(string Plugin, string Path, List<string> FaceIds);
     public record SetOptions(string Game, string OutRoot, string SetName, List<ModInput> Mods, List<string> AssetDirs, bool Bsa, bool CrossMod, bool Repack);
-    public record PluginPlan(int Index, string Name, List<string> FaceIds, int Records, int Reserved, Dictionary<string, int> ModFaces, int NewFaces);
+    // Records = the plugin's record count: exact when Exact (a dry run probed it), else an upper bound
+    public record PluginPlan(int Index, string Name, List<string> FaceIds, int Records, int Reserved, Dictionary<string, int> ModFaces, int NewFaces, bool Exact = false);
     public record SetPlan(List<PluginPlan> Plugins, List<LibraryBuild.Skipped> Skipped, Dictionary<string, string> FaceGenFrom,
                           Dictionary<string, Library.RaceCount> PerRace, Dictionary<string, int> ModRecords, int PinnedFaces, int NewFaces,
                           int Tombstones, string? Error);
@@ -105,6 +106,33 @@ static class LibrarySet
 
     public static SetPlan Plan(SetOptions o) => Plan(o, out _);
 
+    // Per-mod dry-run results are cached for the process: keyed by the mod's path + its face selection, so
+    // re-planning after a checkbox change costs nothing for mods already measured.
+    record ModMeasure(List<LibraryBuild.Skipped> Skipped, Dictionary<string, string> FaceGenFrom, Dictionary<string, Library.RaceCount> PerRace,
+                      int Records, List<string> Valid, string? Error);
+    static readonly Dictionary<string, ModMeasure> MeasureCache = new(StringComparer.OrdinalIgnoreCase);
+    static ModMeasure Measure(SetOptions o, ModInput m)
+    {
+        var key = m.Path + "\n" + string.Join("\n", m.FaceIds.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+        lock (MeasureCache) if (MeasureCache.TryGetValue(key, out var hit)) return hit;
+        ModMeasure res;
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var r = LibraryBuild.Execute(new LibraryBuild.Options(o.Game, Path.GetTempPath(), "plan.esp", new List<string> { m.Path },
+                new HashSet<string>(m.FaceIds, StringComparer.OrdinalIgnoreCase), o.AssetDirs, null, BakeCrossMod: false), dryRun: true);
+            res = new ModMeasure(r.SkippedFaces, r.FaceGenFrom, r.FacesPerRace, r.Overflow ? int.MaxValue : r.NewRecords, r.FaceIds.Keys.ToList(), null);
+            Console.WriteLine($"  measured {m.Plugin}: {r.Donors} faces, {r.NewRecords} records{(r.Overflow ? " (overflow)" : "")} in {sw.ElapsedMilliseconds} ms");
+        }
+        catch (InvalidOperationException e)
+        {
+            // "no faces to build" => everything skipped (listed by the build itself)
+            res = new ModMeasure(new(), new(), new(), 0, new(), e.Message.StartsWith("no faces") ? null : $"{m.Plugin}: {e.Message}");
+        }
+        lock (MeasureCache) MeasureCache[key] = res;
+        return res;
+    }
+
     static SetPlan Plan(SetOptions o, out LibraryRegistry regOut)
     {
         var reg = o.Repack ? new LibraryRegistry { Set = o.SetName } : LibraryRegistry.Load();
@@ -112,8 +140,9 @@ static class LibrarySet
             reg = new LibraryRegistry { Set = o.SetName };   // a different set name starts its own registry
         reg.Set = o.SetName;
         regOut = reg;
+        int capacity = (int)(LibraryBuild.LastId - LibraryBuild.FirstId + 1);
 
-        // 1. per-mod QA + record cost (dry run of the mod alone)
+        // 1. per-mod QA + record cost (dry run of the mod alone, cached)
         var skipped = new List<LibraryBuild.Skipped>(); var faceGenFrom = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var perRace = new Dictionary<string, Library.RaceCount>(StringComparer.OrdinalIgnoreCase);
         var modRecords = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -122,22 +151,13 @@ static class LibrarySet
         foreach (var m in o.Mods)
         {
             if (m.FaceIds.Count == 0) continue;
-            try
-            {
-                var r = LibraryBuild.Execute(new LibraryBuild.Options(o.Game, Path.GetTempPath(), "plan.esp", new List<string> { m.Path },
-                    new HashSet<string>(m.FaceIds, StringComparer.OrdinalIgnoreCase), o.AssetDirs, null, BakeCrossMod: false), dryRun: true);
-                skipped.AddRange(r.SkippedFaces);
-                foreach (var kv in r.FaceGenFrom) faceGenFrom[kv.Key] = kv.Value;
-                foreach (var kv in r.FacesPerRace) { if (!perRace.TryGetValue(kv.Key, out var c)) perRace[kv.Key] = c = new Library.RaceCount(); c.F += kv.Value.F; c.M += kv.Value.M; }
-                modRecords[m.Plugin] = r.Overflow ? int.MaxValue : r.NewRecords;   // overflow: the mod alone exceeds one plugin -> split below
-                valid[m.Plugin] = r.FaceIds.Keys.ToList();
-            }
-            catch (InvalidOperationException e)
-            {
-                // "no faces to build" => everything skipped (already listed)
-                if (!e.Message.StartsWith("no faces")) error = $"{m.Plugin}: {e.Message}";
-                valid[m.Plugin] = new();
-            }
+            var mm = Measure(o, m);
+            skipped.AddRange(mm.Skipped);
+            foreach (var kv in mm.FaceGenFrom) faceGenFrom[kv.Key] = kv.Value;
+            foreach (var kv in mm.PerRace) { if (!perRace.TryGetValue(kv.Key, out var c)) perRace[kv.Key] = c = new Library.RaceCount(); c.F += kv.Value.F; c.M += kv.Value.M; }
+            modRecords[m.Plugin] = mm.Records;
+            valid[m.Plugin] = mm.Valid;
+            error ??= mm.Error;
         }
 
         // 2. current assignment from the registry (only faces still selected & buildable)
@@ -154,43 +174,54 @@ static class LibrarySet
             .Select(m => (m.Plugin, faces: valid[m.Plugin].Where(f => !reg.Faces.ContainsKey(f)).ToList()))
             .Where(x => x.faces.Count > 0).OrderByDescending(x => modRecords.GetValueOrDefault(x.Plugin)).ToList();
         int newCount = newByMod.Sum(x => x.faces.Count);
-        var records = new Dictionary<int, int>();
+        // Capacity bookkeeping WITHOUT dry runs: a plugin's usage is bounded above by its reserved IDs (registry)
+        // plus the sum of the alone-costs of the mods placed into it this round — the closure of a union never
+        // exceeds the sum of the closures — so a mod whose cost fits under that bound is placed with no probe.
+        // Only a mod that does NOT fit by the bound gets the exact bisection (dry runs). `exact[i]` remembers
+        // when a plugin's count came from a real probe (shown as "N" rather than "≤ N").
+        var bound = new Dictionary<int, int>(); var exact = new Dictionary<int, bool>(); var shown = new Dictionary<int, int>();
+        foreach (var i in assigned.Keys) bound[i] = reg.PinnedFaces(i).Count + reg.PinnedRecords(i).Count;
         foreach (var nb in newByMod)
         {
             var plugin = nb.Plugin;
             var rest = new List<string>(nb.faces);
+            int cost = modRecords.GetValueOrDefault(plugin, int.MaxValue);
             var order = assigned.Keys.OrderByDescending(i => assigned[i].Count(f => f.StartsWith(plugin + "#", StringComparison.OrdinalIgnoreCase))).ThenBy(i => i).ToList();
             int pi = 0;
             while (rest.Count > 0)
             {
                 int i;
                 if (pi < order.Count) i = order[pi++];
-                else { i = (assigned.Keys.DefaultIfEmpty(0).Max()) + 1; assigned[i] = new(); }
-                // whole?
-                var fit = TryFit(o, reg, i, assigned[i].Concat(rest));
-                if (fit is not null) { assigned[i].AddRange(rest); records[i] = fit.NewRecords; rest.Clear(); break; }
-                // largest prefix that fits (bisection — the count is monotonic)
-                int lo = 0, hi = rest.Count - 1; LibraryBuild.Result? best = null;
+                else { i = (assigned.Keys.DefaultIfEmpty(0).Max()) + 1; assigned[i] = new(); bound[i] = 0; }
+                if (cost != int.MaxValue && bound[i] + cost <= capacity)   // guaranteed fit, no probe
+                { assigned[i].AddRange(rest); bound[i] += cost; exact[i] = false; rest.Clear(); break; }
+                if (bound[i] >= capacity) continue;                          // full by any measure
+                // exact: largest prefix that fits (bisection — each probe is a dry run of this plugin's full face set)
+                int lo = 0, hi = rest.Count; LibraryBuild.Result? best = null;
                 while (lo < hi)
                 {
                     int mid = (lo + hi + 1) / 2;
                     var t = TryFit(o, reg, i, assigned[i].Concat(rest.Take(mid)));
                     if (t is not null) { lo = mid; best = t; } else hi = mid - 1;
                 }
-                if (lo > 0 && best is not null) { assigned[i].AddRange(rest.Take(lo)); records[i] = best.NewRecords; rest.RemoveRange(0, lo); }
+                if (lo > 0 && best is not null)
+                {
+                    assigned[i].AddRange(rest.Take(lo)); rest.RemoveRange(0, lo);
+                    shown[i] = best.NewRecords; exact[i] = true;
+                    // a bisected plugin is treated as full from here on (its exact free space is unknown to the bound)
+                    bound[i] = rest.Count > 0 ? capacity : best.NewRecords;
+                    if (rest.Count == 0) break;
+                }
                 else if (pi >= order.Count && assigned[i].Count == 0)
                 { error = $"{plugin}: a single face does not fit an empty plugin ({rest[0]})"; rest.Clear(); }
             }
         }
-        // record counts for plugins that received nothing new this time
-        foreach (var i in assigned.Keys.ToList())
-            if (!records.ContainsKey(i) && assigned[i].Count > 0) records[i] = TryFit(o, reg, i, assigned[i])?.NewRecords ?? 0;
 
         var plans = assigned.Where(kv => kv.Value.Count > 0 || reg.Plugins >= kv.Key).OrderBy(kv => kv.Key).Select(kv =>
-            new PluginPlan(kv.Key, PluginName(o.SetName, kv.Key), kv.Value, records.GetValueOrDefault(kv.Key),
+            new PluginPlan(kv.Key, PluginName(o.SetName, kv.Key), kv.Value, shown.TryGetValue(kv.Key, out var ex) ? ex : Math.Min(bound.GetValueOrDefault(kv.Key), capacity),
                 reg.PinnedFaces(kv.Key).Count + reg.PinnedRecords(kv.Key).Count,
                 kv.Value.GroupBy(f => f[..f.IndexOf('#')], StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase),
-                kv.Value.Count(f => !reg.Faces.ContainsKey(f)))).ToList();
+                kv.Value.Count(f => !reg.Faces.ContainsKey(f)), exact.GetValueOrDefault(kv.Key))).ToList();
         return new SetPlan(plans, skipped, faceGenFrom, perRace, modRecords, pinnedCount, newCount, tombstones, error);
     }
 

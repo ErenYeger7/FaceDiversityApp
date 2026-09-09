@@ -28,6 +28,7 @@ using Mutagen.Bethesda.Plugins.Binary.Parameters;
 static class LibraryBuild
 {
     static readonly HashSet<string> Base = Classify.BaseMasters;
+    static readonly Dictionary<string, SourceAssets> AssetsCache = new(StringComparer.OrdinalIgnoreCase);
     // the ESL-flagged plugin's whole space. FDA_ID_LIMIT (hex) lowers the top — test hook to exercise the
     // multi-plugin packing without a 2048-record fixture.
     public const uint FirstId = 0x800;
@@ -110,6 +111,18 @@ static class LibraryBuild
 
         var outMod = new SkyrimMod(ModKey.FromNameAndExtension(outName), GameCfg.Release) { IsSmallMaster = false };
         var assets = new Dictionary<string, SourceAssets>(StringComparer.OrdinalIgnoreCase);
+        // SourceAssets indexes a folder's BSAs (slow for big archives); the set planner runs many dry runs over
+        // the same folders, so instances are cached per folder for the process lifetime (loose-file checks
+        // inside them hit the filesystem live).
+        SourceAssets AssetsFor(string folder)
+        {
+            if (assets.TryGetValue(folder, out var sa)) return sa;
+            lock (AssetsCache)
+            {
+                if (!AssetsCache.TryGetValue(folder, out sa)) AssetsCache[folder] = sa = new SourceAssets(folder);
+            }
+            return assets[folder] = sa;
+        }
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int bakedAssets = 0;
 
@@ -156,7 +169,7 @@ static class LibraryBuild
             catch (Exception e) { Console.WriteLine($"  cannot read {name}: {e.Message}"); return; }
             loaded[name] = (sm, path);
             var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
-            if (!assets.ContainsKey(folder)) assets[folder] = new SourceAssets(folder);
+            AssetsFor(folder);
             foreach (var m in sm.ModHeader.MasterReferences)
             {
                 var mn = m.Master.FileName.ToString();

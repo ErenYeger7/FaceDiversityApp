@@ -219,6 +219,13 @@ static class Serve
                 case "/api/library/builds": Send(ctx, 200, "application/json", Json(LibraryMap.List())); return;
                 case "/api/library/build" when ctx.Request.HttpMethod == "POST": HandleLibraryBuild(ctx); return;
                 case "/api/library/plan" when ctx.Request.HttpMethod == "POST": HandleLibraryPlan(ctx); return;
+                // the curated-mod list alone (whitelists + installed check, no engine work) — what build mode
+                // renders first; the plan follows asynchronously
+                case "/api/library/curated":
+                {
+                    var cur = CuratedSources(null);
+                    Send(ctx, 200, "application/json", Json(new { plugins = cur.Plugins, notInstalled = cur.NotInstalled, empty = cur.Empty, registry = LibraryRegistry.PathOf() })); return;
+                }
                 case "/api/recipes": Send(ctx, 200, "application/json", Json(Recipes.List())); return;
                 case "/api/recipes/run" when ctx.Request.HttpMethod == "POST": HandleRecipesRun(ctx); return;
                 case "/api/recipes/delete" when ctx.Request.HttpMethod == "POST": HandleRecipeDelete(ctx); return;
@@ -322,11 +329,16 @@ static class Serve
 
     // ---- endpoint bodies ----
 
+    // Bumped whenever an API payload the page depends on changes shape. The page carries the level it was
+    // written for and refuses to run against an older server (index.html is read from disk on every load, so
+    // after a `git pull` a still-running old server serves the NEW page against OLD endpoints — "undefined"
+    // fields, disabled buttons).
+    public const int ApiLevel = 4;
     static object ConfigPayload() => new
     {
         game = Game, mods = Mods, outDir = OutDir, voiceMap = VoiceMap,
         profiles = Profiles, profile = Profile, profileList = ListProfiles(),
-        botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release),
+        botPresets = BotPresets, gameData = GameData, gameVersion = GameCfg.Canon(GameCfg.Release), apiLevel = ApiLevel,
         gameVersions = new[] { "SkyrimSE", "SkyrimVR" },
         mugshotRoot = MugshotRoot, libraryRoot = Library.Root(), mugshotAliases = MugshotAliases,
         faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache,
@@ -755,7 +767,7 @@ static class Serve
         var built = new HashSet<string>(plan.Plugins.SelectMany(p => p.FaceIds), StringComparer.OrdinalIgnoreCase);
         return new
         {
-            plugins = plan.Plugins.Select(p => new { p.Index, p.Name, faces = p.FaceIds.Count, p.Records, esl = p.Records <= 2048, p.Reserved, p.ModFaces, p.NewFaces }),
+            plugins = plan.Plugins.Select(p => new { p.Index, p.Name, faces = p.FaceIds.Count, p.Records, p.Exact, esl = p.Records <= 2048, p.Reserved, p.ModFaces, p.NewFaces }),
             skipped = plan.Skipped, faceGenFrom = plan.FaceGenFrom, perRace = PerRaceWithExtras(plan.PerRace, cur, built),
             modRecords = plan.ModRecords, pinnedFaces = plan.PinnedFaces, newFaces = plan.NewFaces, tombstones = plan.Tombstones,
             totalFaces = built.Count, error = plan.Error
