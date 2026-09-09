@@ -168,6 +168,52 @@ static class Faces
         finally { LoadOrderScan.DisposeLoadOrder(lo); }
     }
 
+    // Per-race demand for the per-MOD category: every own-traits adult humanoid NPC the plugin defines, both
+    // sexes. Same join key discipline as the other demands (RaceOf from the game esm; NameOf display only).
+    public static List<RaceDemand> DemandMod(string game, IEnumerable<string> orderedPaths, string modFile)
+    {
+        using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
+        var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
+        string RaceOf(FormKey fk) => raceName.TryGetValue(fk, out var s) && s != "" ? s : fk.ToString();
+        var lo = LoadOrderScan.Build(orderedPaths);
+        try
+        {
+            var cache = lo.ToImmutableLinkCache();
+            string NameOf(FormKey fk) => cache.TryResolve<IRaceGetter>(fk, out var r) && !string.IsNullOrEmpty(r.EditorID) ? r.EditorID! : RaceOf(fk);
+            var m = new Dictionary<string, int>(); var f = new Dictionary<string, int>();
+            var code = new Dictionary<string, string>(); var name = new Dictionary<string, string>();
+            foreach (var n in LoadOrderScan.ModNpcs(lo, modFile, RaceOf))
+            {
+                var key = RaceOf(n.Race.FormKey);
+                var d = Fem(n) ? f : m; d[key] = d.GetValueOrDefault(key) + 1;
+                code[key] = n.Race.FormKey.ToString(); name[key] = NameOf(n.Race.FormKey);
+            }
+            return m.Keys.Union(f.Keys).OrderBy(x => x)
+                .Select(r => new RaceDemand(r, m.GetValueOrDefault(r), f.GetValueOrDefault(r), code.GetValueOrDefault(r, ""), name.GetValueOrDefault(r, r))).ToList();
+        }
+        finally { LoadOrderScan.DisposeLoadOrder(lo); }
+    }
+
+    // Per-MOD info for the UI: target count, the templated NPCs (not refaceable) and where their faces come
+    // from, and how many winning leveled lists reference the targets (Boost slots).
+    public record ModInfo(int Targets, int TargetsM, int TargetsF, LoadOrderScan.TemplateSummary Templates, int Lists);
+    public static ModInfo InfoMod(string game, IEnumerable<string> orderedPaths, string modFile)
+    {
+        using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
+        var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
+        string RaceOf(FormKey fk) => raceName.TryGetValue(fk, out var s) && s != "" ? s : fk.ToString();
+        var lo = LoadOrderScan.Build(orderedPaths);
+        try
+        {
+            var targets = LoadOrderScan.ModNpcs(lo, modFile, RaceOf);
+            var keys = new HashSet<FormKey>(targets.Select(t => t.FormKey));
+            int lists = lo.PriorityOrder.LeveledNpc().WinningOverrides()
+                .Count(ll => ll.Entries is not null && ll.Entries.Any(e => e.Data is not null && keys.Contains(e.Data.Reference.FormKey)));
+            return new ModInfo(targets.Count, targets.Count(t => !Fem(t)), targets.Count(Fem), LoadOrderScan.TemplatesOf(lo, modFile), lists);
+        }
+        finally { LoadOrderScan.DisposeLoadOrder(lo); }
+    }
+
     // Humanoid races from the game esm (those carrying the ActorTypeNPC keyword) — the candidate targets
     // for the phase-2 race merger. Key = the JOIN KEY (RaceOf = esm EditorID), identical to how faces and
     // demand are keyed, so a saved `as: <key>` pools the face into that race's target bucket. Child races

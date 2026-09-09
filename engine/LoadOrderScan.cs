@@ -191,6 +191,81 @@ static class LoadOrderScan
         return res;
     }
 
+    // ---- per-MOD category: every own-traits adult humanoid NPC a plugin DEFINES (male and female, unique or
+    // not — a civil-war mod's leveled-list soldiers are deliberately not unique, so "all named males" never
+    // sees them), as the load order's winning overrides. Plus a summary of the mod's TEMPLATED NPCs: those
+    // have no face of their own; the face seen in game belongs to whatever their template chain resolves to
+    // (a single NPC, or the leaves of a leveled character list) — classified by where those leaves live.
+    public record TemplateSummary(int Templated, int LeavesInMod, int LeavesVanilla, int LeavesOtherMods, int Unresolved, List<string> OtherMods);
+
+    public static List<INpcGetter> ModNpcs(LoadOrder<IModListingGetter<ISkyrimModGetter>> lo, string modFile, Func<FormKey, string> raceOf)
+    {
+        FormKey npcKw = default; bool haveKw = false;
+        foreach (var kw in lo.PriorityOrder.Keyword().WinningOverrides())
+            if (kw.EditorID == "ActorTypeNPC") { npcKw = kw.FormKey; haveKw = true; break; }
+        var cache = lo.ToImmutableLinkCache();
+        var isNpcRace = new Dictionary<FormKey, bool>();
+        bool HumanoidRace(FormKey rk)
+        {
+            if (!haveKw) return true;
+            if (isNpcRace.TryGetValue(rk, out var v)) return v;
+            v = cache.TryResolve<IRaceGetter>(rk, out var r) && r.Keywords is not null && r.Keywords.Any(k => k.FormKey == npcKw);
+            return isNpcRace[rk] = v;
+        }
+        var res = new List<INpcGetter>();
+        foreach (var n in lo.PriorityOrder.Npc().WinningOverrides())
+        {
+            if (!string.Equals(n.FormKey.ModKey.FileName, modFile, StringComparison.OrdinalIgnoreCase)) continue;
+            if (IsPlayerOrPreset(n)) continue;
+            if (n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !n.Template.IsNull) continue;
+            if (raceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!HumanoidRace(n.Race.FormKey)) continue;
+            res.Add(n);
+        }
+        return res;
+    }
+
+    public static TemplateSummary TemplatesOf(LoadOrder<IModListingGetter<ISkyrimModGetter>> lo, string modFile)
+    {
+        var cache = lo.ToImmutableLinkCache();
+        var baseSet = new HashSet<string>(BaseMasters, StringComparer.OrdinalIgnoreCase);
+        int templated = 0, inMod = 0, vanilla = 0, other = 0, unresolved = 0;
+        var otherMods = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        // leaves of a template chain: an NPC that owns its traits, or every NPC entry of a leveled list (one
+        // level of nesting, which is what vanilla uses)
+        void Classify(FormKey leaf)
+        {
+            var mk = leaf.ModKey.FileName.ToString();
+            if (string.Equals(mk, modFile, StringComparison.OrdinalIgnoreCase)) inMod++;
+            else if (baseSet.Contains(mk)) vanilla++;
+            else { other++; otherMods.Add(mk); }
+        }
+        foreach (var n in lo.PriorityOrder.Npc().WinningOverrides())
+        {
+            if (!string.Equals(n.FormKey.ModKey.FileName, modFile, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!(n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !n.Template.IsNull)) continue;
+            templated++;
+            var t = n.Template.FormKey;
+            if (cache.TryResolve<INpcGetter>(t, out var tn))
+            {
+                // follow a chain of templated NPCs to the one that owns its traits (bounded)
+                int guard = 0;
+                while (tn.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !tn.Template.IsNull && guard++ < 8
+                       && cache.TryResolve<INpcGetter>(tn.Template.FormKey, out var next)) tn = next;
+                Classify(tn.FormKey);
+            }
+            else if (cache.TryResolve<ILeveledNpcGetter>(t, out var ll))
+            {
+                var seen = false;
+                foreach (var e in ll.Entries ?? new List<ILeveledNpcEntryGetter>())
+                    if (e.Data is not null && !e.Data.Reference.IsNull) { Classify(e.Data.Reference.FormKey); seen = true; }
+                if (!seen) unresolved++;
+            }
+            else unresolved++;
+        }
+        return new TemplateSummary(templated, inMod, vanilla, other, unresolved, otherMods.ToList());
+    }
+
     // Skyrim.esm 000007 is the player's own NPC record. Checked by FormKey (not EditorID) so an override
     // that renames it still matches.
     public static readonly FormKey PlayerFormKey = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x7);

@@ -131,6 +131,16 @@ categories:
     scan: loadorder-males
     known_replacers: []
 
+  # Per-mod: pick a plugin in the UI; targets = every own-traits adult humanoid NPC that plugin DEFINES
+  # (male + female, unique or not — a civil-war mod's leveled-list soldiers are not unique, so "all named
+  # males" never reaches them). Boost injects extra faces into whatever leveled lists reference those NPCs
+  # (the mod's own lists, or vanilla lists the mod edits). Templated NPCs (no face of their own) are reported.
+  mod:
+    label: Single mod (its own NPCs + leveled lists)
+    verified: true
+    scan: mod
+    known_replacers: []
+
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 # NOT-YET-COVERED: template/leveled "filler" (a separate future feature — see DESIGN.md).
 # The ubiquitous war/city filler is NOT own-traits, so the override approach can't diversify it

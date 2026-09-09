@@ -34,6 +34,7 @@ static class Generate
         string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null, feminineHeightsPath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
         var libraryMaps = new List<string>();   // --library-map: a library build's yaml — its donors are the faces (runtime mode only)
+        string? targetMod = null;               // --target-mod: per-mod category
         bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false; bool feminineHeights = false;
         bool skypatcher = false;   // SkyPatcher runtime mode: donor NPCs in the plugin + copyVisualStyle lines; targets are not overridden
         for (int i = 1; i < args.Length; i++)
@@ -62,6 +63,7 @@ static class Generate
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
                 case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
                 case "--library-map": libraryMaps.Add(args[++i]); break;     // faces from a self-contained library build (FDA_Library_*.esp)
+                case "--target-mod": targetMod = args[++i]; break;           // per-mod category: the plugin whose NPCs are the targets
             }
         if (game is null || outFolder is null || outName is null || (srcSpecs.Count == 0 && libraryMaps.Count == 0))
         { Console.Error.WriteLine("need --game --out --name and at least one --source/--keep/--disable/--library-map"); return 1; }
@@ -114,17 +116,32 @@ static class Generate
         //  (b) scan categories (all_males): winning UNIQUE named-male overrides across the whole active
         //      load order — many defining plugins. Kept alive (loScan) through the override loop because
         //      the target getters lazily read from the memory-mapped source; disposed at the very end.
-        bool scan = Categories.IsScan(category);
+        //  (c) the per-MOD category: every own-traits NPC one chosen plugin defines (both sexes, unique or not),
+        //      as winning overrides; Boost draws its lists from the whole load order (whatever references them).
+        bool modCat = Categories.IsMod(category);
+        bool scan = Categories.IsScan(category) && !modCat;
         LoadOrder<IModListingGetter<ISkyrimModGetter>>? loScan = null, loBase = null;
         List<INpcGetter> targets;
-        if (scan)
+        if (scan || modCat)
         {
             if (loadOrderPath is null || !File.Exists(loadOrderPath))
             { Console.Error.WriteLine($"category '{category}' is a load-order scan but no --loadorder file was given"); return 1; }
+            if (modCat && string.IsNullOrWhiteSpace(targetMod))
+            { Console.Error.WriteLine("the per-mod category needs --target-mod <plugin filename>"); return 1; }
             var paths = File.ReadAllLines(loadOrderPath).Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
             loScan = LoadOrderScan.Build(paths);
-            targets = LoadOrderScan.UniqueNamedMales(loScan, RaceOf);
-            Console.WriteLine($"Load-order scan: {paths.Count} plugins → {targets.Count} unique named males.");
+            if (modCat)
+            {
+                targets = LoadOrderScan.ModNpcs(loScan, targetMod!, RaceOf);
+                var ts = LoadOrderScan.TemplatesOf(loScan, targetMod!);
+                Console.WriteLine($"Mod {targetMod}: {targets.Count} own-traits NPCs ({targets.Count(t => !Fem(t))} M / {targets.Count(Fem)} F) as targets; "
+                                + $"{ts.Templated} templated NPCs have no face of their own (their faces come from: {ts.LeavesInMod} leaves in this mod (targets here), {ts.LeavesVanilla} vanilla, {ts.LeavesOtherMods} other mods{(ts.OtherMods.Count > 0 ? " [" + string.Join(", ", ts.OtherMods) + "]" : "")}, {ts.Unresolved} unresolved).");
+            }
+            else
+            {
+                targets = LoadOrderScan.UniqueNamedMales(loScan, RaceOf);
+                Console.WriteLine($"Load-order scan: {paths.Count} plugins → {targets.Count} unique named males.");
+            }
         }
         else
         {
@@ -491,8 +508,9 @@ static class Generate
             // the source disabled and no BSA force-load — the fix for CW-sourced purple eyes/hair.
             if (face.Disable || bakeTextures) foreach (var tex in DdsPathsInNif(fgNif)) ExtractAsset(assets[face.Folder], tex);
         }
-        // Scan targets are fully read now — release the load order's ~90 memory-mapped file handles.
-        if (loScan is not null) { LoadOrderScan.DisposeLoadOrder(loScan); loScan = null; }
+        // Scan targets are fully read now — release the load order's ~90 memory-mapped file handles (the
+        // per-mod category still needs it for Boost's leveled lists; released after Boost).
+        if (loScan is not null && !modCat) { LoadOrderScan.DisposeLoadOrder(loScan); loScan = null; }
 
         // ---- Leveled-List Boost: place EXTRA faces (beyond vanilla slots) as NEW cloned NPCs, and inject
         // them into the vanilla leveled lists via a shipped SkyPatcher config. Each clone copies a real
@@ -509,9 +527,12 @@ static class Generate
         // own — each gets a copyVisualStyle line from its donor (in-plugin or library) like every other target.
         if (boost && !scan)
         {
-            // which LeveledNpc lists each vanilla NPC sits in, with the entry's level+count
+            // which LeveledNpc lists each target sits in, with the entry's level+count. Prefix categories: the
+            // game esm's lists. Per-mod: every WINNING list in the load order that references a target (the mod's
+            // own lists, or a vanilla list the mod edits).
             var lvlnOfNpc = new Dictionary<FormKey, List<(FormKey ll, short lvl, short cnt)>>();
-            foreach (var ll in esm.LeveledNpcs)
+            IEnumerable<ILeveledNpcGetter> lists = modCat && loScan is not null ? loScan.PriorityOrder.LeveledNpc().WinningOverrides() : esm.LeveledNpcs;
+            foreach (var ll in lists)
             {
                 if (ll.Entries is null) continue;
                 foreach (var e in ll.Entries)
@@ -586,7 +607,7 @@ static class Generate
                         else if (face.Disable || bakeTextures) foreach (var tex in DdsPathsInNif(fg)) ExtractAsset(assets[face.Folder], tex);
                     }
                     foreach (var (ll, lvl, cnt) in lvlnOfNpc[donor.FormKey])
-                        skyLines.Add($"filterByLLs=Skyrim.esm|{ll.ID:X}:addOnceToLLs={outName}|{fk.ID:X}~{lvl}~{cnt}");
+                        skyLines.Add($"filterByLLs={ll.ModKey.FileName}|{ll.ID:X}:addOnceToLLs={outName}|{fk.ID:X}~{lvl}~{cnt}");
                     boostAdded++; boostReport[race] = boostReport.GetValueOrDefault(race) + 1;
                 }
             }
@@ -594,6 +615,7 @@ static class Generate
 
         // Base-master targets are fully read now (override loop + Boost done) — release those handles.
         if (loBase is not null) { LoadOrderScan.DisposeLoadOrder(loBase); loBase = null; }
+        if (loScan is not null) { LoadOrderScan.DisposeLoadOrder(loScan); loScan = null; }
 
         // Deep-copy ONLY the disable-source records a transplanted face actually reaches — the worn head
         // parts AND the TXST/CLFM/FLST/sub-HDPT they reference (transitive closure) — NOT every record the

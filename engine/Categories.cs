@@ -42,6 +42,12 @@ static class Categories
     public static bool IsScan(string category) =>
         All.FirstOrDefault(x => string.Equals(x.Key, category, StringComparison.OrdinalIgnoreCase))?.Scan is { Length: > 0 };
 
+    // The per-MOD category (`scan: mod`): targets are the NPCs one chosen plugin defines (own traits, both
+    // sexes, unique or not) + Boost from whatever leveled lists reference them. Needs the load order (so it
+    // is also a scan) plus a --target-mod.
+    public static bool IsMod(string category) =>
+        string.Equals(All.FirstOrDefault(x => string.Equals(x.Key, category, StringComparison.OrdinalIgnoreCase))?.Scan, "mod", StringComparison.OrdinalIgnoreCase);
+
     // A category's target_editorid_prefix may be a single prefix ("EncBandit") or a '|'-separated set
     // ("EncSoldier|EncSiege") when one logical group spans several vanilla EditorID prefixes. An EditorID
     // matches if it StartsWith ANY of them. Single-prefix specs (no '|') behave exactly as before.

@@ -289,6 +289,11 @@ window.addEventListener('unhandledrejection',function(ev){
     <div class="card">
       <label class="fld">Category</label>
       <select id="category"></select>
+      <div id="targetModRow" class="hidden" style="margin-top:6px">
+        <label class="fld" style="margin-top:0">Target mod <span class="muted">— the plugin whose own NPCs are refaced</span></label>
+        <select id="targetMod"></select>
+        <div class="muted" id="modInfo" style="margin-top:4px"></div>
+      </div>
       <div class="muted" id="catNote" style="margin-top:4px"></div>
       <div class="warnbox hidden" id="scanWarn" style="margin-top:6px"></div>
 
@@ -576,7 +581,8 @@ function spPcts(){ return [...document.querySelectorAll('#spTiers .spPct')].map(
 // Distinct group+feature combos get distinct filenames, so a new group can't silently overwrite another.
 function groupToken(){
   const c = state.config && state.config.categories.find(x=>x.key===$('#category').value);
-  const label = (c && c.label) || $('#category').value || 'Group';
+  // per-mod category: the group is the target plugin's name
+  const label = (c && c.mod) ? (($('#targetMod').value||'Mod').replace(/\.es[pml]$/i,'')) : ((c && c.label) || $('#category').value || 'Group');
   return label.replace(/\(.*?\)/g,' ').split(/[^A-Za-z0-9]+/).filter(Boolean)
               .map(w=>w[0].toUpperCase()+w.slice(1)).join('') || 'Group';
 }
@@ -598,14 +604,35 @@ function spSumCheck(){
     el.style.color = s===100 ? 'var(--good)' : 'var(--warn)'; }
 }
 
+// per-mod category: the target plugin picker (active plugins, base masters excluded), filled once
+async function ensureTargetMods(){
+  if(state.targetMods) return;
+  try{ state.targetMods = await api('/api/target-mods'); }catch{ state.targetMods=[]; }
+  const sel=$('#targetMod'); sel.innerHTML = state.targetMods.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join('');
+  sel.onchange = onCategory;
+}
+function targetQs(){ const c = state.config.categories.find(x=>x.key===$('#category').value); return (c && c.mod) ? '&target='+encodeURIComponent($('#targetMod').value||'') : ''; }
+
 async function onCategory(){
   const c = state.config.categories.find(x=>x.key===$('#category').value);
-  const scan = !!(c && c.scan);
-  $('#catNote').textContent = c ? (scan ? 'load-order scan — no fixed replacer' : ('known replacers: ' + (c.knownReplacers.join(', ')||'—'))) : '';
+  const scan = !!(c && c.scan), mod = !!(c && c.mod);
+  $('#catNote').textContent = c ? (mod ? 'per-mod: this plugin\'s own NPCs + whatever leveled lists reference them' : scan ? 'load-order scan — no fixed replacer' : ('known replacers: ' + (c.knownReplacers.join(', ')||'—'))) : '';
+  $('#targetModRow').classList.toggle('hidden', !mod);
+  if(mod) await ensureTargetMods();
   // Scan categories (all loaded males) touch named characters across the whole load order — make the
   // scope and the feminization consequence explicit before the user hits Create.
   const sw = $('#scanWarn');
-  if(scan){ sw.classList.remove('hidden');
+  if(mod){
+    sw.classList.remove('hidden');
+    sw.innerHTML = `<span class="spin"></span> reading ${esc($('#targetMod').value||'the plugin')}…`;
+    try{
+      const mi = await api('/api/modinfo?target='+encodeURIComponent($('#targetMod').value||''));
+      const t = mi.templates||{};
+      sw.innerHTML = `<b>${esc($('#targetMod').value)}</b>: <b>${mi.targets}</b> own-traits NPCs are the targets (${mi.targetsM} M / ${mi.targetsF} F — unique or not; with <b>Feminize</b> on the males become women). `
+        + `Boost can inject into <b>${mi.lists}</b> leveled list${mi.lists===1?'':'s'} that reference them. `
+        + (t.templated ? `<b>${t.templated}</b> NPCs use a <i>template</i> and have no face of their own — not refaced; their faces come from ${t.leavesInMod} leaves in this mod (covered here)${t.leavesVanilla?`, ${t.leavesVanilla} vanilla (use the vanilla categories)`:''}${t.leavesOtherMods?`, ${t.leavesOtherMods} in other mods (${esc((t.otherMods||[]).join(', '))})`:''}${t.unresolved?`, ${t.unresolved} unresolved`:''}.` : 'No templated NPCs.');
+    }catch(e){ sw.innerHTML = `<div>✘ ${esc(e&&e.message?e.message:e)}</div>`; }
+  } else if(scan){ sw.classList.remove('hidden');
     sw.innerHTML = `<b>Load-order scan.</b> Substitutes every <b>unique named male</b> across your active load order (≈789 on this list) — jarls, companions, questgivers. Only races your selected faces cover are changed; the rest keep their vanilla face (skipped). With <b>Feminize</b> on, these named men become women (face + Female flag + race-matched female voice). Turning it off needs harvested <i>male</i> faces or nearly everyone skips.`;
   } else sw.classList.add('hidden');
   // Feminine names only match named characters — meaningful for the scan category, inert for generic Enc* ones.
@@ -613,12 +640,12 @@ async function onCategory(){
   if(fnAvail){ $('#fnNote').textContent = scan ? `(${state.femnames.count} names — editable in config/feminine_names.yaml)`
                                                  : '(named categories only — generic NPCs won\'t match)'; }
   $('#fnDetail').textContent = scan ? 'Feminized males get a feminine display name via SkyPatcher (e.g. Ulfric → Ulfrica). Requires SkyPatcher enabled.' : '';
-  try { state.demand = await api('/api/demand?category='+encodeURIComponent($('#category').value)); }
+  try { state.demand = await api('/api/demand?category='+encodeURIComponent($('#category').value)+targetQs()); }
   catch { state.demand = []; }
-  try { state.boostInfo = await api('/api/boostinfo?category='+encodeURIComponent($('#category').value)); }
+  try { state.boostInfo = await api('/api/boostinfo?category='+encodeURIComponent($('#category').value)+targetQs()); }
   catch { state.boostInfo = {boostable:false,lists:0}; }
   const bEl = $('#boost');
-  if(!state.boostInfo.boostable){ bEl.checked=false; bEl.disabled=true; $('#boostNote').textContent = scan ? '(N/A — placed uniques, no leveled-list slots)' : '(not available — no leveled lists for this category)'; }
+  if(!state.boostInfo.boostable){ bEl.checked=false; bEl.disabled=true; $('#boostNote').textContent = mod ? '(no leveled list references this mod\'s NPCs)' : scan ? '(N/A — placed uniques, no leveled-list slots)' : '(not available — no leveled lists for this category)'; }
   else { bEl.disabled=false; $('#boostNote').textContent=`(${state.boostInfo.lists} leveled lists)`; }
   if(state.faces.length) renderFaces(); // usability (dimming) depends on the category's races
   renderCoverage();
@@ -771,6 +798,18 @@ function servedRaces(f){
 // A face whose pool race is a hex FormKey (a race not in the game esm — custom follower race, or a DLC race on a
 // trimmed esm) can't be drawn by any vanilla slot on its own: that's exactly what the `serve:` selector is for.
 function unreachable(f){ return /:/.test(f.poolRace||''); }
+// The exact reason a face is dimmed, for its tooltip — so a wrong join is diagnosable from the row itself.
+function whyUnusable(f){
+  const fem = $('#feminize') ? $('#feminize').checked : true;
+  const parts=[];
+  for(const r of servedRaces(f)){
+    const d = state.demand.find(x=>x.race===r);
+    if(!d){ parts.push(`${r}: no target of this race in the category`); continue; }
+    if(fem) parts.push(`${r}: ${f.sex==='F' ? 'ok?' : 'male face — with Feminize on only female faces are used'}`);
+    else parts.push(`${r}: targets M ${d.targetM} / F ${d.targetF}, face is ${f.sex} — no ${f.sex==='F'?'female':'male'} target`);
+  }
+  return 'not used by this category — ' + parts.join('; ') + (f.serve?` (serve: ${f.serve})`:'') + (f.as?` (also: ${f.as})`:'');
+}
 function faceUsable(f){
   const fem = $('#feminize') ? $('#feminize').checked : true;
   for(const r of servedRaces(f)){
@@ -856,7 +895,7 @@ function renderFaces(){
     const bl = state.blacklist.has(f.formKey);
     const dim = (!lib && !faceUsable(f)) ? 'unusable' : '';
     const cls = [dim, bl?'blacklisted':''].filter(Boolean).join(' ');
-    const ttl = lib ? '' : (faceUsable(f)?'':'not used by this category (wrong race/gender)');
+    const ttl = lib ? '' : (faceUsable(f)?'':whyUnusable(f));
     const thumb = lib ? `<td class="libcol thumbcol">${thumbHtml(f)}</td>` : '';
     const asVal = state.raceAs[f.id]||'', svVal = state.raceServe[f.id]||'';
     const compatOthers = (state.compat && state.compat[f.poolRace]) || [];
@@ -1107,7 +1146,8 @@ $('#createBtn').onclick = async ()=>{
     feminineNames: $('#femNames').checked,
     feminineHeights: $('#femHeights').checked,
     bakeTextures: $('#bakeTextures').checked,
-    runtime: isRuntime()
+    runtime: isRuntime(),
+    targetMod: (state.config.categories.find(x=>x.key===$('#category').value)||{}).mod ? $('#targetMod').value : null
   };
   let res;
   try { res = await api('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); }

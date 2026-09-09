@@ -263,10 +263,12 @@ static class Serve
                 case "/api/mugshot-alias" when ctx.Request.HttpMethod == "POST": HandleMugshotAlias(ctx); return;
                 case "/api/demand":
                 {
-                    var cat = q["category"] ?? "bandit";
+                    var cat = q["category"] ?? "bandit"; var target = q["target"];
                     try
                     {
-                        var d = Categories.IsScan(cat)
+                        var d = Categories.IsMod(cat)
+                            ? (string.IsNullOrWhiteSpace(target) ? new List<Faces.RaceDemand>() : Faces.DemandMod(Game, ResolveActiveLoadOrder(), target!))
+                            : Categories.IsScan(cat)
                             ? Faces.DemandLoadOrder(Game, ResolveActiveLoadOrder())
                             : Faces.Demand(Game, cat);
                         Send(ctx, 200, "application/json", Json(d));
@@ -276,14 +278,35 @@ static class Serve
                 }
                 case "/api/boostinfo":
                 {
-                    var cat = q["category"] ?? "bandit";
+                    var cat = q["category"] ?? "bandit"; var target = q["target"];
                     try
                     {
+                        if (Categories.IsMod(cat))
+                        {
+                            int n = string.IsNullOrWhiteSpace(target) ? 0 : Faces.InfoMod(Game, ResolveActiveLoadOrder(), target!).Lists;
+                            Send(ctx, 200, "application/json", Json(new { boostable = n > 0, lists = n })); return;
+                        }
                         // Scan categories (all_males) can't be boosted — placed uniques, no leveled-list slots.
                         if (Categories.IsScan(cat)) { Send(ctx, 200, "application/json", Json(new { boostable = false, lists = 0 })); return; }
-                        int n = Faces.BoostListCount(Game, cat);
-                        Send(ctx, 200, "application/json", Json(new { boostable = n > 0, lists = n }));
+                        int n2 = Faces.BoostListCount(Game, cat);
+                        Send(ctx, 200, "application/json", Json(new { boostable = n2 > 0, lists = n2 }));
                     }
+                    catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
+                    return;
+                }
+                // per-mod category: the active plugins a target can be picked from (base masters excluded), and
+                // one plugin's target/templated summary for the UI note
+                case "/api/target-mods":
+                {
+                    var plugins = ResolveActiveLoadOrder().Select(Path.GetFileName)
+                        .Where(f => f is not null && !Classify.BaseMasters.Contains(f!)).ToList();
+                    Send(ctx, 200, "application/json", Json(plugins)); return;
+                }
+                case "/api/modinfo":
+                {
+                    var target = q["target"];
+                    if (string.IsNullOrWhiteSpace(target)) { Send(ctx, 400, "application/json", Json(new { error = "target required" })); return; }
+                    try { Send(ctx, 200, "application/json", Json(Faces.InfoMod(Game, ResolveActiveLoadOrder(), target!))); }
                     catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
                     return;
                 }
@@ -344,7 +367,7 @@ static class Serve
         faceFinderEnabled = FaceFinderEnabled, faceFinderCache = FaceFinderCache,
         settingsPath = Settings.FilePath,
         feminizeDefault = true,
-        categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan) })
+        categories = Categories.All.Select(c => new { c.Key, c.Label, c.Verified, c.KnownReplacers, scan = !string.IsNullOrEmpty(c.Scan), mod = Categories.IsMod(c.Key) })
     };
 
     record SettingsReq(string? GameVersion, string? Game, string? Mods, string? Profiles, string? Profile, string? BotPresets, string? GameData, string? MugshotRoot,
@@ -505,7 +528,8 @@ static class Serve
     record GenSource(string Path, string? Mode);
     record GenReq(string? Category, List<GenSource>? Sources, List<string>? Include, string? Name, string? Out,
                   bool Feminize = true, bool Boost = false, bool Sexplague = false, List<int>? SexplaguePct = null,
-                  bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false, bool Runtime = false);
+                  bool FeminineNames = false, bool BakeTextures = false, bool FeminineHeights = false, bool Runtime = false,
+                  string? TargetMod = null);   // per-mod category: plugin filename whose NPCs are the targets
 
     static string FeminineNamesPath() => Path.Combine(Path.GetDirectoryName(Config) ?? ".", "feminine_names.yaml");
     static string RaceCompatPath() => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(Config)) ?? ".", "race_compat.yaml");
@@ -553,6 +577,7 @@ static class Serve
             loFile = Path.Combine(Path.GetTempPath(), $"facediv-lo-{Guid.NewGuid():N}.txt");
             File.WriteAllLines(loFile, paths);
             a.Add("--loadorder"); a.Add(loFile);
+            if (Categories.IsMod(req.Category ?? "") && !string.IsNullOrWhiteSpace(req.TargetMod)) { a.Add("--target-mod"); a.Add(req.TargetMod!); }
         }
         if (!req.Feminize) a.Add("--no-feminize");
         if (req.Boost) a.Add("--boost");
