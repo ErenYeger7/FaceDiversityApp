@@ -17,7 +17,8 @@ static class Faces
         string? As = null,    // library double-dip: an ADDITIONAL race this face also serves (overlay; set by ApplyLibrary)
         string[]? HeadPartKeys = null,    // head parts this face wears that live IN its source plugin (transitive via ExtraParts) — what a disable/standalone build deep-copies
         string? Serve = null,             // library adopt: a vanilla race this CUSTOM-race face is pooled under; the target adopts the face's race (set by ApplyLibrary)
-        bool Library = false);            // face comes from a LIBRARY BUILD (donor already in FDA_Library_*.esp) — no source mod, no records to copy
+        bool Library = false,             // face comes from a LIBRARY BUILD (donor already in FDA_Library_*.esp) — no source mod, no records to copy
+        bool FaceGen = true);             // the source's own mod folder holds this face's FaceGen mesh + tint (QA: without them the face is the dark-face bug)
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display
@@ -51,6 +52,14 @@ static class Faces
                 // Head-part records that live IN this plugin (own + overrides) — the same membership the engine's
                 // srcRec uses when a disable/standalone build deep-copies a face's worn parts (+ ExtraParts).
                 var ownHdpt = sm.HeadParts.ToDictionary(h => h.FormKey);
+                // FaceGen presence in the source's own folder (loose or BSA): the QA flag surfaced in the UI.
+                var srcAssets = new SourceAssets(Path.GetDirectoryName(Path.GetFullPath(sp))!);
+                bool HasFaceGen(INpcGetter n)
+                {
+                    var sub = n.FormKey.ModKey.FileName.ToString(); var id = "00" + n.FormKey.ID.ToString("x6");
+                    return srcAssets.Has(Path.Combine("meshes", "actors", "character", "facegendata", "facegeom", sub, id + ".nif"))
+                        && srcAssets.Has(Path.Combine("textures", "actors", "character", "facegendata", "facetint", sub, id + ".dds"));
+                }
                 string[] WornKeys(INpcGetter npc)
                 {
                     var keys = new List<string>(); var seen = new HashSet<FormKey>();
@@ -66,6 +75,9 @@ static class Faces
                 }
                 foreach (var n in sm.Npcs)
                 {
+                    // An NPC whose TRAITS come from a template has no face of its own (and never any FaceGen) — it is
+                    // not a harvestable face. Dead/duplicate variants of a named NPC are typically templated this way.
+                    if (!OwnTraits(n)) continue;
                     bool custom = !Classify.BaseMasters.Contains(n.Race.FormKey.ModKey.FileName);
                     // pool by ORIGINAL vanilla race for overrides (see Generate), else the record's own race
                     var poolRace = Classify.BaseMasters.Contains(n.FormKey.ModKey.FileName)
@@ -74,7 +86,7 @@ static class Faces
                     list.Add(new FaceInfo(
                         FaceId(sp, n.FormKey), Path.GetFileName(sp), n.FormKey.ToString(), n.EditorID,
                         poolRace, RaceOf(n.Race.FormKey), n.Voice.FormKey.IsNull ? null : n.Voice.FormKey.ToString(),
-                        custom, Fem(n) ? "F" : "M", sourceMod, HeadPartKeys: WornKeys(n)));
+                        custom, Fem(n) ? "F" : "M", sourceMod, HeadPartKeys: WornKeys(n), FaceGen: HasFaceGen(n)));
                 }
             }
         }

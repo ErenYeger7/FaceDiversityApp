@@ -129,12 +129,20 @@ static class Serve
                     var mods = ScanMods(string.IsNullOrWhiteSpace(mp) ? Mods : mp!, pf is null ? Profile : (pf.Length == 0 ? null : pf));
                     // Library builds appear as a pseudo-mod at the top: one "plugin" per build, addressed as
                     // <builds dir>\<plugin>.esp so the picker/addSource/faces flow needs no special casing.
+                    // A SET (FDA_Library.yaml holding rows for FDA_Library_1..N.esp) is ONE entry, addressed as
+                    // <builds>\FDA_Library.esp; a single build is addressed by its own plugin name.
                     var builds = LibraryMap.List();
                     if (builds.Count > 0)
                     {
                         var sums = new Dictionary<string, Dictionary<string, Library.RaceCount>>(StringComparer.OrdinalIgnoreCase);
-                        foreach (var b in builds) if (LibraryMap.Load(b.Map) is { } m) sums[b.Plugin] = LibraryMap.Summary(m);
-                        mods.Insert(0, new ModEntry("Library builds (self-contained face plugins)", LibraryMap.BuildsDir(), builds.Select(b => b.Plugin).ToArray(), true, -1, sums));
+                        var entries = new List<string>();
+                        foreach (var b in builds)
+                        {
+                            var entry = b.Plugins.Count > 0 ? b.Name + ".esp" : b.Plugin;
+                            entries.Add(entry);
+                            if (LibraryMap.Load(b.Map) is { } m) sums[entry] = LibraryMap.Summary(m);
+                        }
+                        mods.Insert(0, new ModEntry("Library builds (self-contained face plugins)", LibraryMap.BuildsDir(), entries.ToArray(), true, -1, sums));
                     }
                     Send(ctx, 200, "application/json", Json(mods)); return;
                 }
@@ -150,7 +158,9 @@ static class Serve
                             plugin = Path.GetFileName(src), folder = LibraryMap.BuildsDir(),
                             femaleNpcs = m?.Faces.Count(f => f.Sex.Equals("F", StringComparison.OrdinalIgnoreCase)) ?? 0, ownHdpt = 0,
                             overridesVanilla = false, usesCustomRace = false, hasBsa = false, shipsRaceTextures = false, faceGenLoose = true,
-                            mode = "library", why = "self-contained library build — its donors are referenced directly; no source mods needed; SkyPatcher runtime output only"
+                            mode = "library", plugins = m?.Plugins ?? new List<string>(),
+                            why = (m is { Plugins.Count: > 1 } ? $"library SET of {m.Plugins.Count} plugins ({string.Join(", ", m.Plugins)}) — " : "self-contained library build — ")
+                                + "its donors are referenced directly; no source mods needed; SkyPatcher runtime output only"
                         })); return;
                     }
                     Send(ctx, 200, "application/json", Json(Classify.Inspect(src))); return;
@@ -209,6 +219,9 @@ static class Serve
                 case "/api/library/builds": Send(ctx, 200, "application/json", Json(LibraryMap.List())); return;
                 case "/api/library/build" when ctx.Request.HttpMethod == "POST": HandleLibraryBuild(ctx); return;
                 case "/api/library/plan" when ctx.Request.HttpMethod == "POST": HandleLibraryPlan(ctx); return;
+                case "/api/recipes": Send(ctx, 200, "application/json", Json(Recipes.List())); return;
+                case "/api/recipes/run" when ctx.Request.HttpMethod == "POST": HandleRecipesRun(ctx); return;
+                case "/api/recipes/delete" when ctx.Request.HttpMethod == "POST": HandleRecipeDelete(ctx); return;
                 case "/api/library/blacklist":
                 {
                     if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
@@ -493,7 +506,17 @@ static class Serve
         var req = JsonSerializer.Deserialize<GenReq>(body, J);
         if (req?.Sources is null || req.Sources.Count == 0 || string.IsNullOrWhiteSpace(req.Name))
         { Send(ctx, 400, "application/json", Json(new { error = "need sources[] and name" })); return; }
+        var res = RunGenerate(req);
+        // a successful Create is saved as a RECIPE (its exact inputs) so it can be regenerated in one click after a
+        // library rebuild / re-pack or on another PC
+        string? recipe = null;
+        if (res.ok) { try { recipe = Recipes.Save(req); } catch { } }
+        Send(ctx, res.ok ? 200 : 500, "application/json", Json(new { res.ok, res.log, res.outFolder, res.readme, recipe }));
+    }
 
+    record GenResult(bool ok, string log, string outFolder, string? readme);
+    static GenResult RunGenerate(GenReq req)
+    {
         var outFolder = string.IsNullOrWhiteSpace(req.Out)
             ? Path.Combine(OutDir, Path.GetFileNameWithoutExtension(req.Name!)) : req.Out!;
 
@@ -579,8 +602,69 @@ static class Serve
         if (assetDirsFile is not null) { try { File.Delete(assetDirsFile); } catch { } }
         if (raceOvFile is not null) { try { File.Delete(raceOvFile); } catch { } }
         var readme = Path.Combine(outFolder, "README.txt");
-        Send(ctx, code == 0 ? 200 : 500, "application/json",
-            Json(new { ok = code == 0, log, outFolder, readme = File.Exists(readme) ? File.ReadAllText(readme) : null }));
+        return new GenResult(code == 0, log, outFolder, File.Exists(readme) ? File.ReadAllText(readme) : null);
+    }
+
+    // ---- recipes: a Create's exact inputs, saved so it can be regenerated later ----
+    record RecipeNames(List<string>? Names);
+    static void HandleRecipesRun(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        RecipeNames? req; try { req = JsonSerializer.Deserialize<RecipeNames>(body, J); } catch { req = null; }
+        var names = req?.Names is { Count: > 0 } n ? n : Recipes.List().Select(x => x.Name).ToList();
+        var results = new List<object>();
+        foreach (var name in names)
+        {
+            var rq = Recipes.Load(name);
+            if (rq is null) { results.Add(new { name, ok = false, log = "recipe not found" }); continue; }
+            var res = RunGenerate(rq);
+            results.Add(new { name, res.ok, log = res.log, res.outFolder });
+        }
+        Send(ctx, 200, "application/json", Json(new { results }));
+    }
+    static void HandleRecipeDelete(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        RecipeNames? req; try { req = JsonSerializer.Deserialize<RecipeNames>(body, J); } catch { req = null; }
+        int n = 0; foreach (var name in req?.Names ?? new()) if (Recipes.Delete(name)) n++;
+        Send(ctx, 200, "application/json", Json(new { ok = true, deleted = n }));
+    }
+    static class Recipes
+    {
+        static string Dir() => Path.Combine(Library.Root(), "recipes");
+        static string PathOf(string name) => Path.Combine(Dir(), name + ".json");
+        public record Info(string Name, string? Category, int Sources, int Faces, bool Runtime, string SavedAt, List<string> SourceNames);
+        public static string Save(GenReq req)
+        {
+            Directory.CreateDirectory(Dir());
+            var name = Path.GetFileNameWithoutExtension(req.Name ?? "recipe");
+            var doc = JsonSerializer.SerializeToNode(req, J)!.AsObject();
+            doc["savedAt"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            File.WriteAllText(PathOf(name), doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return PathOf(name);
+        }
+        public static GenReq? Load(string name)
+        {
+            var p = PathOf(name);
+            if (!File.Exists(p)) return null;
+            try { return JsonSerializer.Deserialize<GenReq>(File.ReadAllText(p), J); } catch { return null; }
+        }
+        public static bool Delete(string name) { var p = PathOf(name); if (!File.Exists(p)) return false; File.Delete(p); return true; }
+        public static List<Info> List()
+        {
+            var res = new List<Info>();
+            if (!Directory.Exists(Dir())) return res;
+            foreach (var f in Directory.EnumerateFiles(Dir(), "*.json").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                var name = Path.GetFileNameWithoutExtension(f);
+                var rq = Load(name); if (rq is null) continue;
+                string saved = "";
+                try { saved = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(f))?["savedAt"]?.ToString() ?? ""; } catch { }
+                res.Add(new Info(name, rq.Category, rq.Sources?.Count ?? 0, rq.Include?.Count ?? 0, rq.Runtime, saved,
+                                 (rq.Sources ?? new()).Select(s => Path.GetFileName(s.Path)).ToList()));
+            }
+            return res;
+        }
     }
 
     // Run a command with stdout+stderr captured (single-threaded loop => no console race).
@@ -637,88 +721,82 @@ static class Serve
             .Concat(LoadOrderScan.DisabledMods(profileDir, Mods).Select(m => m.folder)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    // Dry-run: the engine's own indexing + closure over the selected curated plugins, so the UI's ESPFE/ESP
-    // projection and per-race totals are exactly what a build would produce.
-    record LibraryPlanReq(List<string>? Plugins);
+    // The library SET (see LibrarySet.cs): every curated mod's whitelisted faces -> as many ESPFE plugins as
+    // needed, stable IDs via the registry. Plan = the packing (each fit is an engine dry run); Build = plan + build.
+    record LibrarySetReq(List<string>? Plugins = null, string? Name = null, bool BakeTextures = true, bool Bsa = true, bool Repack = false);
+    static LibrarySet.SetOptions SetOptionsFor(LibrarySetReq req, out Curated cur)
+    {
+        var only = req.Plugins is null ? null : new HashSet<string>(req.Plugins, StringComparer.OrdinalIgnoreCase);
+        cur = CuratedSources(only);
+        var byPlugin = cur.Include.GroupBy(id => id[..id.IndexOf('#')], StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+        var mods = cur.Sources.Select(p => new LibrarySet.ModInput(Path.GetFileName(p), p, byPlugin.GetValueOrDefault(Path.GetFileName(p), new()))).ToList();
+        var name = string.IsNullOrWhiteSpace(req.Name) ? "FDA_Library" : req.Name!.Trim().Replace(".esp", "", StringComparison.OrdinalIgnoreCase);
+        return new LibrarySet.SetOptions(Game, OutDir, name, mods, LibraryAssetDirs(), req.Bsa, req.BakeTextures, req.Repack);
+    }
+    // per-race totals incl. the whitelists' `as:`/`serve:` extra races (what the faces can serve, like Mod Creator counts)
+    static Dictionary<string, Library.RaceCount> PerRaceWithExtras(Dictionary<string, Library.RaceCount> baseCounts, Curated cur, HashSet<string> built)
+    {
+        var perRace = new Dictionary<string, Library.RaceCount>(baseCounts, StringComparer.OrdinalIgnoreCase);
+        foreach (var p in cur.Plugins)
+            foreach (var e in Library.LoadWhitelistEntries(p.Plugin))
+            {
+                if (!built.Contains($"{p.Plugin}#{e.Key.Trim()}")) continue;
+                foreach (var extra in new[] { e.As, e.Serve })
+                {
+                    if (string.IsNullOrWhiteSpace(extra)) continue;
+                    if (!perRace.TryGetValue(extra.Trim(), out var c)) perRace[extra.Trim()] = c = new Library.RaceCount();
+                    if (string.Equals(e.Sex, "M", StringComparison.OrdinalIgnoreCase)) c.M++; else c.F++;
+                }
+            }
+        return perRace;
+    }
+    static object PlanPayload(LibrarySet.SetPlan plan, Curated cur)
+    {
+        var built = new HashSet<string>(plan.Plugins.SelectMany(p => p.FaceIds), StringComparer.OrdinalIgnoreCase);
+        return new
+        {
+            plugins = plan.Plugins.Select(p => new { p.Index, p.Name, faces = p.FaceIds.Count, p.Records, esl = p.Records <= 2048, p.Reserved, p.ModFaces, p.NewFaces }),
+            skipped = plan.Skipped, faceGenFrom = plan.FaceGenFrom, perRace = PerRaceWithExtras(plan.PerRace, cur, built),
+            modRecords = plan.ModRecords, pinnedFaces = plan.PinnedFaces, newFaces = plan.NewFaces, tombstones = plan.Tombstones,
+            totalFaces = built.Count, error = plan.Error
+        };
+    }
     static void HandleLibraryPlan(HttpListenerContext ctx)
     {
         string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
-        LibraryPlanReq? req;
-        try { req = JsonSerializer.Deserialize<LibraryPlanReq>(body, J) ?? new LibraryPlanReq(null); }
+        LibrarySetReq? req;
+        try { req = JsonSerializer.Deserialize<LibrarySetReq>(body, J) ?? new LibrarySetReq(); }
         catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
-        var only = req.Plugins is null ? null : new HashSet<string>(req.Plugins, StringComparer.OrdinalIgnoreCase);
-        var cur = CuratedSources(only);
+        var o = SetOptionsFor(req, out var cur);
         object? plan = null; string? error = null;
-        if (cur.Sources.Count > 0)
+        if (o.Mods.Count > 0)
         {
-            try
-            {
-                var res = LibraryBuild.Execute(new LibraryBuild.Options(Game, Path.GetTempPath(), "FDA_Library_plan.esp", cur.Sources,
-                    new HashSet<string>(cur.Include, StringComparer.OrdinalIgnoreCase), LibraryAssetDirs(), null, BakeCrossMod: false), dryRun: true);
-                // per-race totals incl. the whitelists' `as:`/`serve:` extra races (what the faces can serve, like Mod Creator counts)
-                var perRace = new Dictionary<string, Library.RaceCount>(res.FacesPerRace, StringComparer.OrdinalIgnoreCase);
-                var inc = new HashSet<string>(cur.Include, StringComparer.OrdinalIgnoreCase);
-                foreach (var p in cur.Plugins.Where(p => only is null || only.Contains(p.Plugin)))
-                {
-                    var ents = Library.LoadWhitelistEntries(p.Plugin);
-                    foreach (var e in ents)
-                    {
-                        if (!inc.Contains($"{p.Plugin}#{e.Key.Trim()}")) continue;
-                        foreach (var extra in new[] { e.As, e.Serve })
-                        {
-                            if (string.IsNullOrWhiteSpace(extra)) continue;
-                            if (!perRace.TryGetValue(extra.Trim(), out var c)) perRace[extra.Trim()] = c = new Library.RaceCount();
-                            if (string.Equals(e.Sex, "M", StringComparison.OrdinalIgnoreCase)) c.M++; else c.F++;
-                        }
-                    }
-                }
-                plan = new { donors = res.Donors, records = res.NewRecords, esl = res.Esl, byType = res.CopiedByType, extraMasters = res.ExtraMasters,
-                             unresolved = res.Unresolved, missingMasters = res.MissingMasters, dangling = res.DanglingDropped,
-                             facesPerPlugin = res.FacesPerPlugin, perRace };
-            }
+            try { plan = PlanPayload(LibrarySet.Plan(o), cur); }
             catch (Exception e) { error = e.Message; }
         }
-        Send(ctx, 200, "application/json", Json(new { plugins = cur.Plugins, notInstalled = cur.NotInstalled, empty = cur.Empty, plan, error }));
+        Send(ctx, 200, "application/json", Json(new { plugins = cur.Plugins, notInstalled = cur.NotInstalled, empty = cur.Empty, setName = o.SetName, registry = LibraryRegistry.PathOf(), plan, error }));
     }
 
-    record LibraryBuildReq(string? Name, bool BakeTextures = true, List<string>? Plugins = null, bool Bsa = true);
     static void HandleLibraryBuild(HttpListenerContext ctx)
     {
         string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
-        LibraryBuildReq? req;
-        try { req = JsonSerializer.Deserialize<LibraryBuildReq>(body, J) ?? new LibraryBuildReq(null); }
+        LibrarySetReq? req;
+        try { req = JsonSerializer.Deserialize<LibrarySetReq>(body, J) ?? new LibrarySetReq(); }
         catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
-        var name = string.IsNullOrWhiteSpace(req.Name) ? $"FDA_Library_{DateTime.Now:yyMMdd}.esp" : req.Name!.Trim();
-        if (!name.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)) name += ".esp";
-        var stem = Path.GetFileNameWithoutExtension(name);
-        var outFolder = Path.Combine(OutDir, stem);
-
-        var only = req.Plugins is null ? null : new HashSet<string>(req.Plugins, StringComparer.OrdinalIgnoreCase);
-        var cur = CuratedSources(only);
-        var sources = cur.Sources; var include = cur.Include; var notInstalled = cur.NotInstalled; var empty = cur.Empty;
-        if (sources.Count == 0)
-        { Send(ctx, 400, "application/json", Json(new { error = "no curated faces to build: save at least one whitelist in Curate mode" + (notInstalled.Count > 0 ? $" (curated but not installed here: {string.Join(", ", notInstalled)})" : "") })); return; }
-
-        var includeFile = Path.Combine(Path.GetTempPath(), $"facediv-libinc-{Guid.NewGuid():N}.txt");
-        File.WriteAllLines(includeFile, include);
-        var dirsFile = Path.Combine(Path.GetTempPath(), $"facediv-libdirs-{Guid.NewGuid():N}.txt");
-        File.WriteAllLines(dirsFile, LibraryAssetDirs());
-        var mapPath = Path.Combine(LibraryMap.BuildsDir(), stem + ".yaml");
-
-        var a = new List<string> { "build-library", "--game", Game, "--out", outFolder, "--name", name, "--include", includeFile, "--asset-dirs", dirsFile, "--map", mapPath };
-        if (!req.BakeTextures) a.Add("--no-cross-mod");
-        if (req.Bsa) a.Add("--bsa");
-        foreach (var s in sources) { a.Add("--source"); a.Add(s); }
-        var (code, log) = CaptureRun(a.ToArray(), LibraryBuild.Run);
-        try { File.Delete(includeFile); File.Delete(dirsFile); } catch { }
+        var o = SetOptionsFor(req, out var cur);
+        if (o.Mods.Count == 0)
+        { Send(ctx, 400, "application/json", Json(new { error = "no curated faces to build: save at least one whitelist in Curate mode" + (cur.NotInstalled.Count > 0 ? $" (curated but not installed here: {string.Join(", ", cur.NotInstalled)})" : "") })); return; }
+        LibrarySet.SetResult? res = null;
+        var (code, log) = CaptureRun(Array.Empty<string>(), _ => { res = LibrarySet.Build(o); return 0; });
         var notes = new List<string>();
-        if (notInstalled.Count > 0) notes.Add("curated but NOT installed on this PC (skipped): " + string.Join(", ", notInstalled));
-        if (empty.Count > 0) notes.Add("curated with no faces ticked (skipped): " + string.Join(", ", empty));
-        var readme = Path.Combine(outFolder, "README.txt");
+        if (cur.NotInstalled.Count > 0) notes.Add("curated but NOT installed on this PC (skipped): " + string.Join(", ", cur.NotInstalled));
+        if (cur.Empty.Count > 0) notes.Add("curated with no faces ticked (skipped): " + string.Join(", ", cur.Empty));
+        var readme = res is null ? null : Path.Combine(res.OutFolder, "README.txt");
         Send(ctx, code == 0 ? 200 : 500, "application/json", Json(new
         {
-            ok = code == 0, log = (notes.Count > 0 ? string.Join("\n", notes) + "\n\n" : "") + log, outFolder, map = mapPath,
-            sources = sources.Count, faces = include.Count, readme = File.Exists(readme) ? File.ReadAllText(readme) : null
+            ok = code == 0, log = (notes.Count > 0 ? string.Join("\n", notes) + "\n\n" : "") + log, outFolder = res?.OutFolder, map = res?.MapPath,
+            plugins = res?.Names, faces = res?.Plan.Plugins.Sum(p => p.FaceIds.Count), skipped = res?.Plan.Skipped.Count,
+            readme = readme is not null && File.Exists(readme) ? File.ReadAllText(readme) : null
         }));
     }
 

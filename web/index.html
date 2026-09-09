@@ -270,7 +270,7 @@ window.addEventListener('unhandledrejection',function(ev){
     <div id="buildMid" class="hidden">
       <h2>3 · Curated mods → library plugin</h2>
       <div class="card">
-        <div class="muted" style="margin-bottom:8px">Tick the curated mods to pack into <b>one</b> plugin (blacklist applied). Every face becomes a donor NPC with its FaceGen, head parts, custom race and skin <b>copied in</b>, so the plugin needs no source mods and travels between MO2 instances. Keep a build under the <b>2048-record</b> limit and it ships as ESPFE (no load-order slot); split big libraries into several builds — Mod Creator can use several at once.</div>
+        <div class="muted" style="margin-bottom:8px">Tick the curated mods for the library <b>set</b> (blacklist applied). Every face becomes a donor NPC with its FaceGen, head parts, custom race and skin <b>copied in</b>, so the set needs no source mods and travels between MO2 instances. The build packs faces <b>by mod</b> into as many ESPFE plugins as the 2048-record limit needs (<code>FDA_Library_1.esp</code>, <code>_2</code>…), each with its own BSAs, in one mod folder. IDs are <b>stable</b>: rebuilding after curating more faces appends, so existing SkyPatcher configs keep working.</div>
         <div class="row" style="margin-bottom:6px"><button class="mini" id="bsAll">All</button><button class="mini" id="bsNone">None</button><span class="muted flex1" style="text-align:right" id="bsCount"></span></div>
         <div id="buildPlugins"><div class="muted">loading curated mods…</div></div>
         <div id="buildProj" style="margin-top:8px"></div>
@@ -353,6 +353,13 @@ window.addEventListener('unhandledrejection',function(ev){
     </div>
 
     <div class="card">
+      <label class="fld" style="margin-top:0">Saved recipes <span class="muted">— every successful Create keeps its exact inputs; regenerate them all after a library rebuild / re-pack or on another PC</span></label>
+      <div id="recipeList" class="muted">…</div>
+      <button class="mini" id="recipesRunAll" style="margin-top:8px" disabled>Regenerate all</button>
+      <div id="recipeOut"></div>
+    </div>
+
+    <div class="card">
       <label class="fld" style="margin-top:0">Verify assets <span class="muted">— find missing/purple face textures + hidden dependency mods</span></label>
       <div class="row" style="gap:8px">
         <input type="text" id="auditPath" placeholder="folder of a generated/installed mod (e.g. …\mods\FDA_Bandits_F)">
@@ -375,16 +382,22 @@ window.addEventListener('unhandledrejection',function(ev){
     <div id="buildRight" class="hidden">
       <h2>4 · Build</h2>
       <div class="card">
-        <div class="muted" style="margin-bottom:8px">The plugin lands under the output root as <code>&lt;name&gt;/</code>; the map (yaml + csv) of donor ↔ original face is written next to it and under <code>library/builds/</code>. In <b>Mod Creator</b> the build appears as a source under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;build&gt;|&lt;donor&gt;</code>). Dated names tell you which build a config was made with.</div>
-        <label style="display:block;margin-bottom:6px">Plugin name <input id="libBuildName" style="width:100%" placeholder="FDA_Library_yymmdd.esp"></label>
+        <div class="muted" style="margin-bottom:8px">The set lands under the output root as <code>&lt;name&gt;/</code> (one mod folder: all plugins + BSAs + READMEs); the map (yaml + csv) of donor ↔ original face is written next to it and under <code>library/builds/</code>. In <b>Mod Creator</b> the whole set is <b>one source</b> under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;plugin&gt;|&lt;donor&gt;</code>); a config's README names the plugins it actually uses.</div>
+        <label style="display:block;margin-bottom:6px">Set name <input id="libBuildName" style="width:100%" placeholder="FDA_Library"> <span class="muted">→ <code>FDA_Library_1.esp</code>, <code>_2</code>… — keep it; a new name starts a new registry</span></label>
         <label class="chk"><input type="checkbox" id="libBuildBake" checked> <span>Bake cross-mod textures <span class="muted">(brows/eyes/hair a face takes from other packs; body skin at vanilla paths is never baked)</span></span></label>
+        <label class="chk"><input type="checkbox" id="libBuildRepack"> <span>Re-pack from scratch <span class="muted">(forget the registry: re-optimizes the packing but changes IDs — regenerate every config afterwards via Saved recipes)</span></span></label>
         <label class="chk"><input type="checkbox" id="libBuildBsa" checked> <span>Pack assets into BSA <span class="muted">(LZ4-compressed <code>&lt;name&gt;.bsa</code> + <code>&lt;name&gt; - Textures.bsa</code>, auto-loaded with the plugin; a group over the 4 GB per-archive limit is split into further archives carried by empty ESL dummy plugins; every archive is read back and verified before the loose files are removed)</span></span></label>
-        <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build library plugin</button>
+        <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build / update library set</button>
         <div id="libBuildOut"></div>
       </div>
       <div class="card">
         <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">EXISTING BUILDS</h3>
         <div id="libBuilds" class="muted"></div>
+      </div>
+      <div class="card">
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">QA — FACES NOT BUILT</h3>
+        <div class="muted" style="margin-bottom:6px">Left out of the set with the reason, so you can fix the origin (or un-whitelist them). Faces whose FaceGen was found in <i>another</i> mod folder are built and listed separately.</div>
+        <div id="buildQa" class="muted">—</div>
       </div>
     </div>
   </section>
@@ -847,7 +860,7 @@ function renderFaces(){
     return `<tr class="${cls}" title="${esc(ttl)}">
       <td><input type="checkbox" ${state.selected.has(f.id)?'checked':''} onchange="tog('${jsq(f.id)}',this.checked)"></td>
       ${thumb}
-      <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
+      <td title="${esc(f.formKey)}${f.customRace?' · custom race: '+esc(f.npcRace):''}${f.faceGen===false?' · NO FaceGen in its mod folder: the library build will look in other mod folders, else skip it (dark-face bug otherwise)':''}">${esc(f.editorID||'(no EditorID)')}${f.customRace?' <span class="muted">◆</span>':''}${f.faceGen===false?' <span class="tag-bl" style="background:rgba(255,176,72,.18);color:#ffd9a3">no FaceGen</span>':''}${bl?' <span class="tag-bl">blacklisted</span>':''}</td>
       <td style="color:${f.sex==='F'?'var(--accent)':'var(--warn)'};font-weight:600">${f.sex}</td>
       <td>${esc(f.poolRace)}${(!lib && f.as) ? ` <span class="muted" title="library double-dip: also serves ${esc(f.as)}">+${esc(shortRace(f.as))}</span>` : ''}${(!lib && f.serve) ? ` <span class="muted" title="library adopt: fills ${esc(f.serve)} slots; the NPC becomes this face's race">→${esc(shortRace(f.serve))}</span>` : ''}</td>
       ${ascell}
@@ -1089,6 +1102,7 @@ $('#createBtn').onclick = async ()=>{
     `<pre class="log">${esc(res.log||'')}</pre>`+
     (res.readme?`<details><summary class="muted">README.txt</summary><pre class="log">${esc(res.readme)}</pre></details>`:'');
   if(res.ok && res.outFolder) $('#auditPath').value = winPath(res.outFolder);  // ready to verify what we just built
+  if(res.ok) refreshRecipes();   // every successful Create is saved as a recipe
 };
 
 // ---------- verify assets ----------
@@ -1236,22 +1250,14 @@ function renderLibSummary(){
   if(btn) btn.disabled=false;
 }
 // ---------- library build mode ----------
-// Names are dated so a SkyPatcher config says which build it was made with; a second build the same day
-// gets _2, _3… (the existing-builds list decides).
-function defaultLibName(){
-  const d=new Date(), p=n=>String(n).padStart(2,'0');
-  const base=`FDA_Library_${String(d.getFullYear()).slice(2)}${p(d.getMonth()+1)}${p(d.getDate())}`;
-  const taken = new Set((state.libBuilds||[]).map(b=>(b.plugin||'').replace(/\.esp$/i,'').toLowerCase()));
-  let n=1, name=base; while(taken.has(name.toLowerCase())) name=`${base}_${++n}`;
-  return name+'.esp';
-}
+// One SET (default "FDA_Library") rebuilt in place with stable IDs — the registry keeps every donor's plugin +
+// FormID, so a rebuild appends and existing SkyPatcher configs keep working.
 async function refreshLibBuilds(){
   const el=$('#libBuilds'); if(!el) return;
   try{ state.libBuilds = await api('/api/library/builds'); }catch{ state.libBuilds=[]; }
   el.innerHTML = state.libBuilds.length
-    ? state.libBuilds.map(b=>`<div class="stat"><span title="${esc(b.map)}">${esc(b.plugin)} <span class="muted">· ${esc(b.built||'')}</span></span><b>${b.faces} faces</b></div>`).join('')
+    ? state.libBuilds.map(b=>`<div class="stat"><span title="${esc(b.map)}">${esc(b.plugins&&b.plugins.length ? b.name+' — set of '+b.plugins.length+' plugin'+(b.plugins.length===1?'':'s') : b.plugin)} <span class="muted">· ${esc(b.built||'')}</span></span><b>${b.faces} faces</b></div>`).join('')
     : 'No library build yet.';
-  if($('#libBuildName') && !$('#libBuildName').value.trim()) $('#libBuildName').placeholder = defaultLibName();
 }
 // Which curated mods go into the next build (default: every installed one). Re-planned on every change via
 // the engine's dry run, so the ESPFE/ESP verdict is the build's own count.
@@ -1263,7 +1269,7 @@ async function loadBuildPlan(){
   proj.innerHTML='<div class="muted"><span class="spin"></span> projecting (engine dry run)…</div>';
   const seq=++planSeq;
   let r;
-  try{ r = await api('/api/library/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ plugins: first ? null : [...state.buildSel] })}); }
+  try{ r = await api('/api/library/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ plugins: first ? null : [...state.buildSel], name:$('#libBuildName').value.trim()||null, repack:$('#libBuildRepack').checked })}); }
   catch(e){ proj.innerHTML=`<div class="warnbox">✘ ${esc(e&&e.message?e.message:e)}</div>`; return; }
   if(seq!==planSeq) return;   // a newer plan is in flight
   if(first) state.buildSel = new Set(r.plugins.filter(p=>p.installed && p.faces>0).map(p=>p.plugin));
@@ -1286,23 +1292,34 @@ function renderBuildPlugins(r){
   $('#bsCount').textContent = `${nSel} mod${nSel===1?'':'s'} · ${nFaces} faces`;
 }
 function renderBuildProjection(r){
-  const proj=$('#buildProj'), races=$('#buildRaces');
+  const proj=$('#buildProj'), races=$('#buildRaces'), qa=$('#buildQa');
   if(!r.plan){
     proj.innerHTML = r.error ? `<div class="warnbox">✘ ${esc(r.error)}</div>` : '<div class="muted">Nothing selected.</div>';
-    races.innerHTML='<tr><td colspan="4" class="muted">—</td></tr>'; $('#libBuildBtn').disabled=true; return;
+    races.innerHTML='<tr><td colspan="4" class="muted">—</td></tr>'; if(qa) qa.textContent='—'; $('#libBuildBtn').disabled=true; return;
   }
-  const p=r.plan, esl=p.esl;
-  const copies = Object.entries(p.byType||{}).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`${n} ${t}`).join(', ');
-  proj.innerHTML = `<div class="warnbox" style="${esl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
-    + `Projected build: <b>${p.donors}</b> donor NPC${p.donors===1?'':'s'} + copied records (${esc(copies)||'none'}) = <b>${p.records}</b> new records → <b>${esl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>`
-    + (esl ? ' — fits the 2048 limit, no load-order slot.' : ' — exceeds 2048, so it would take a load-order slot. Untick some mods and build them as a second library.')
-    + (p.extraMasters&&p.extraMasters.length ? `<div style="margin-top:4px">⚠ still references records in <b>${esc(p.extraMasters.join(', '))}</b> (kinds the build doesn't copy) — those plugins would remain masters.</div>` : '<div style="margin-top:4px">Masters: base game only — fully self-contained.</div>')
-    + (p.missingMasters&&p.missingMasters.length ? `<div style="margin-top:4px">⚠ masters not installed here: ${esc(p.missingMasters.join(', '))}</div>` : '')
+  const p=r.plan, plugins=p.plugins||[], allEsl = plugins.every(x=>x.esl);
+  const rows = plugins.map(x=>`<div style="margin:3px 0"><b>${esc(x.name)}</b> — ${x.faces} faces, <b>${x.records}</b> records → ${x.esl?'ESPFE':'FULL ESP'}`
+      + (x.newFaces?` <span class="muted">(+${x.newFaces} new)</span>`:'') + (x.reserved?` <span class="muted">· ${x.reserved} IDs pinned</span>`:'')
+      + `<div class="muted" style="margin-left:10px">${esc(Object.entries(x.modFaces||{}).sort((a,b)=>b[1]-a[1]).map(([m,n])=>`${m.replace(/\.esp$/i,'')} ${n}`).join(' · '))}</div></div>`).join('');
+  proj.innerHTML = `<div class="warnbox" style="${allEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
+    + `Set <b>${esc(r.setName||'FDA_Library')}</b>: <b>${p.totalFaces}</b> faces in <b>${plugins.length}</b> plugin${plugins.length===1?'':'s'}`
+    + (p.pinnedFaces?` · ${p.pinnedFaces} already placed (stable IDs)`:'') + (p.newFaces?` · <b>${p.newFaces}</b> new`:'') + (p.tombstones?` · ${p.tombstones} tombstones`:'')
+    + (p.skipped&&p.skipped.length?` · <span style="color:#ffd9a3">${p.skipped.length} not built (QA)</span>`:'')
+    + `${rows}`
+    + (p.error?`<div class="warnbox" style="margin-top:6px">✘ ${esc(p.error)}</div>`:'')
     + `</div>`;
   const ents = Object.entries(p.perRace||{}).map(([race,c])=>({race,f:c.f||0,m:c.m||0})).sort((a,b)=>(b.f+b.m)-(a.f+a.m)||a.race.localeCompare(b.race));
   races.innerHTML = ents.length ? ents.map(e=>`<tr><td>${esc(e.race)}</td><td style="text-align:right">${e.f}</td><td style="text-align:right">${e.m}</td><td style="text-align:right"><b>${e.f+e.m}</b></td></tr>`).join('')
-    + `<tr><td class="muted">total distinct faces</td><td></td><td></td><td style="text-align:right"><b>${p.donors}</b></td></tr>` : '<tr><td colspan="4" class="muted">—</td></tr>';
-  $('#libBuildBtn').disabled = !p.donors;
+    + `<tr><td class="muted">total distinct faces</td><td></td><td></td><td style="text-align:right"><b>${p.totalFaces}</b></td></tr>` : '<tr><td colspan="4" class="muted">—</td></tr>';
+  if(qa){
+    const sk=(p.skipped||[]), fg=Object.entries(p.faceGenFrom||{});
+    const byReason={}; for(const s of sk) (byReason[s.reason]||=[]).push(s);
+    qa.innerHTML = (sk.length||fg.length) ? Object.entries(byReason).map(([reason,list])=>`<details style="margin-bottom:6px"><summary><b>${list.length}</b> — ${esc(reason)}</summary>`
+        + list.slice(0,300).map(s=>`<div style="margin-left:10px">${esc(s.source.replace(/\.esp$/i,''))} · ${esc(s.npc)}${s.name?' “'+esc(s.name)+'”':''}</div>`).join('') + (list.length>300?`<div class="muted" style="margin-left:10px">… ${list.length-300} more</div>`:'') + `</details>`).join('')
+      + (fg.length?`<details><summary><b>${fg.length}</b> — FaceGen taken from another mod folder (built)</summary>`+fg.slice(0,300).map(([k,v])=>`<div style="margin-left:10px">${esc(k)} ← ${esc(v)}</div>`).join('')+`</details>`:'')
+      : 'Nothing skipped.';
+  }
+  $('#libBuildBtn').disabled = !p.totalFaces || !!p.error;
 }
 window.togBuildPlugin = function(plugin,on){
   if(on) state.buildSel.add(plugin); else state.buildSel.delete(plugin);
@@ -1312,19 +1329,44 @@ $('#bsAll').onclick  = ()=>{ state.buildSel = new Set((state.buildPlugins||[]).f
 $('#bsNone').onclick = ()=>{ state.buildSel = new Set(); loadBuildPlan(); };
 async function buildLibrary(){
   const btn=$('#libBuildBtn'), out=$('#libBuildOut');
-  btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> building the library plugin (copies records + FaceGen + textures; can take a few minutes)…</div>';
+  if($('#libBuildRepack').checked && !confirm('Re-pack from scratch forgets the registry: every donor may get a new plugin/FormID, so EVERY SkyPatcher config that uses the library must be regenerated afterwards (Mod Creator → Saved recipes → Regenerate all).\n\nContinue?')) return;
+  btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> building the library set (copies records + FaceGen + textures, packs BSAs; can take several minutes)…</div>';
   let res;
-  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||defaultLibName(), bakeTextures:$('#libBuildBake').checked, bsa:$('#libBuildBsa').checked, plugins:[...(state.buildSel||[])] })}); }
+  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||null, bakeTextures:$('#libBuildBake').checked, bsa:$('#libBuildBsa').checked, repack:$('#libBuildRepack').checked, plugins:[...(state.buildSel||[])] })}); }
   catch(e){ res={ ok:false, log:'request failed: '+(e&&e.message?e.message:e) }; }
-  out.innerHTML = `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ built':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}</div>`
+  out.innerHTML = `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ built':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}${res.plugins?` <span class="muted">(${res.plugins.length} plugin${res.plugins.length===1?'':'s'}, ${res.faces} faces${res.skipped?', '+res.skipped+' skipped':''})</span>`:''}</div>`
     + `<pre class="log">${esc(res.log||'')}</pre>`
     + (res.readme?`<details><summary class="muted">README.txt</summary><pre class="log">${esc(res.readme)}</pre></details>`:'');
   btn.disabled=false;
-  $('#libBuildName').value='';
+  $('#libBuildRepack').checked=false;
   await refreshLibBuilds();
+  loadBuildPlan();   // the registry changed: pinned counts, tombstones
 }
 if($('#libBuildBtn')){ $('#libBuildBtn').onclick = buildLibrary; }
 $('#modeBuild').onclick = ()=>setAppMode('build');
+
+// ---------- recipes (Mod Creator) ----------
+async function refreshRecipes(){
+  const el=$('#recipeList'); if(!el) return;
+  let list=[]; try{ list = await api('/api/recipes'); }catch{ list=[]; }
+  state.recipes=list;
+  el.innerHTML = list.length ? list.map(r=>`<div class="stat"><span title="${esc(r.sourceNames.join(', '))}">${esc(r.name)} <span class="muted">· ${esc(r.category||'')} · ${r.faces} faces · ${r.runtime?'SkyPatcher':'ESP'} · ${esc(r.savedAt||'')}</span></span>`
+      + `<span><button class="mini" onclick="runRecipes(['${jsq(r.name)}'])">Regenerate</button> <button class="mini" onclick="deleteRecipe('${jsq(r.name)}')" title="forget this recipe (the output mod is not touched)">✕</button></span></div>`).join('')
+    : '<div class="muted">No recipe yet — every successful Create is saved here.</div>';
+  $('#recipesRunAll').disabled = !list.length;
+}
+window.runRecipes = async function(names){
+  const out=$('#recipeOut'); out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> regenerating '+(names?names.length:'all')+'…</div>';
+  let r; try{ r = await api('/api/recipes/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:names||null})}); }
+  catch(e){ out.innerHTML='<div class="warnbox">✘ '+esc(e&&e.message?e.message:e)+'</div>'; return; }
+  out.innerHTML = (r.results||[]).map(x=>`<details style="margin-top:4px"><summary>${x.ok?'✔':'✘'} ${esc(x.name)} ${x.outFolder?'<span class="muted">→ '+esc(winPath(x.outFolder))+'</span>':''}</summary><pre class="log">${esc(x.log||'')}</pre></details>`).join('');
+};
+window.deleteRecipe = async function(name){
+  if(!confirm('Forget recipe "'+name+'"? (its output mod is not touched)')) return;
+  try{ await api('/api/recipes/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({names:[name]})}); }catch{}
+  refreshRecipes();
+};
+if($('#recipesRunAll')){ $('#recipesRunAll').onclick = ()=>runRecipes(null); refreshRecipes(); }
 
 async function saveLibrary(){
   if(!state.sources.length) return;

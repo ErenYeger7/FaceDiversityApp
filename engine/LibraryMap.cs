@@ -18,6 +18,7 @@ class LibraryMap
         public string Name { get; set; } = "";
         public string Origin { get; set; } = "";       // origin FormKey string ("013265:Skyrim.esm")
         public string Library { get; set; } = "";      // FormID (hex, no plugin) in the library plugin
+        public string Plugin { get; set; } = "";       // which plugin of a SET holds the donor ("" = the map's Plugin)
         public string EditorId { get; set; } = "";     // donor EditorID in the library plugin
         public string PoolRace { get; set; } = "";     // join key (esm race name, or hex) — identical to FaceInfo.PoolRace
         public string Race { get; set; } = "";         // FormKey the donor's race resolves to (copied into the library, or vanilla)
@@ -26,9 +27,11 @@ class LibraryMap
         public string Sex { get; set; } = "F";
     }
 
-    public string Plugin { get; set; } = "";
+    public string Plugin { get; set; } = "";           // a single build's plugin, or the SET name (rows then carry their own Plugin)
     public string Built { get; set; } = "";
+    public List<string> Plugins { get; set; } = new(); // set members (empty for a single build)
     public List<Row> Faces { get; set; } = new();
+    public string PluginOf(Row r) => string.IsNullOrWhiteSpace(r.Plugin) ? Plugin : r.Plugin;
 
     static readonly IDeserializer De = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance).IgnoreUnmatchedProperties().Build();
@@ -72,6 +75,7 @@ class LibraryMap
         sb.Append("# race/skin = what the donor resolves to (copied into this plugin when the source's were custom).\n");
         sb.Append("plugin: ").Append(Library.Quote(m.Plugin)).Append('\n');
         sb.Append("built: ").Append(Library.Quote(m.Built)).Append('\n');
+        if (m.Plugins.Count > 0) sb.Append("plugins: [").Append(string.Join(", ", m.Plugins.Select(Library.Quote))).Append("]\n");
         sb.Append("faces:\n");
         foreach (var r in m.Faces)
             sb.Append("  - { key: ").Append(Library.Quote(r.Key))
@@ -81,6 +85,7 @@ class LibraryMap
               .Append(", name: ").Append(Library.Quote(r.Name))
               .Append(", origin: ").Append(Library.Quote(r.Origin))
               .Append(", library: ").Append(Library.Quote(r.Library))
+              .Append(string.IsNullOrWhiteSpace(r.Plugin) ? "" : ", plugin: " + Library.Quote(r.Plugin))
               .Append(", editorId: ").Append(Library.Quote(r.EditorId))
               .Append(", poolRace: ").Append(Library.Quote(r.PoolRace))
               .Append(", race: ").Append(Library.Quote(r.Race))
@@ -90,10 +95,10 @@ class LibraryMap
         File.WriteAllText(yamlPath, sb.ToString());
 
         var csv = new System.Text.StringBuilder();
-        csv.Append("key,source,sourceMod,npc,name,origin,library,editorId,poolRace,race,skin,weight,sex\n");
+        csv.Append("key,source,sourceMod,npc,name,origin,plugin,library,editorId,poolRace,race,skin,weight,sex\n");
         static string C(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
         foreach (var r in m.Faces)
-            csv.Append(string.Join(",", new[] { C(r.Key), C(r.Source), C(r.SourceMod), C(r.Npc), C(r.Name), C(r.Origin), C(r.Library), C(r.EditorId),
+            csv.Append(string.Join(",", new[] { C(r.Key), C(r.Source), C(r.SourceMod), C(r.Npc), C(r.Name), C(r.Origin), C(m.PluginOf(r)), C(r.Library), C(r.EditorId),
                                                 C(r.PoolRace), C(r.Race), C(r.Skin), r.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), C(r.Sex) })).Append('\n');
         File.WriteAllText(Path.ChangeExtension(yamlPath, ".csv"), csv.ToString());
     }
@@ -119,13 +124,13 @@ class LibraryMap
         return d;
     }
 
-    public record BuildInfo(string Name, string Plugin, int Faces, string Built, string Map);
+    public record BuildInfo(string Name, string Plugin, int Faces, string Built, string Map, List<string> Plugins);
     public static List<BuildInfo> List()
     {
         var res = new List<BuildInfo>();
         if (!Directory.Exists(BuildsDir())) return res;
         foreach (var y in Directory.EnumerateFiles(BuildsDir(), "*.yaml").OrderByDescending(f => f, StringComparer.OrdinalIgnoreCase))
-            if (Load(y) is { } m) res.Add(new BuildInfo(Path.GetFileNameWithoutExtension(y), m.Plugin, m.Faces.Count, m.Built, y));
+            if (Load(y) is { } m) res.Add(new BuildInfo(Path.GetFileNameWithoutExtension(y), m.Plugin, m.Faces.Count, m.Built, y, m.Plugins));
         return res;
     }
 }

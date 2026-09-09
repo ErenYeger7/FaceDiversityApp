@@ -4,10 +4,10 @@ using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Plugins.Binary.Parameters;
 
-// `build-library` — ONE self-contained face-library plugin from the curated Library:
+// `build-library` — ONE self-contained face-library plugin from curated faces:
 //
-//   build-library --game <Skyrim.esm> --out <dir> --name FDA_Library_<yymmdd>.esp --source <esp>...
-//                 [--include <file of face ids>] [--asset-dirs <file of mod folders>] [--map <yaml>]
+//   build-library --game <Skyrim.esm> --out <dir> --name <plugin>.esp --source <esp>...
+//                 [--include <file of face ids>] [--asset-dirs <file of mod folders>] [--map <yaml>] [--bsa] [--no-cross-mod]
 //
 // Every included face becomes a NEW, never-placed donor NPC carrying that source's face fields, with the
 // source's FaceGen re-keyed under this plugin. Then EVERYTHING the donors reach in the sources and in the
@@ -17,20 +17,35 @@ using Mutagen.Bethesda.Plugins.Binary.Parameters;
 // base game, installable in any MO2 instance on its own, that SkyPatcher configs reference by
 // copyVisualStyle=<this plugin>|<donor>. The map (yaml + csv) records donor <-> original face.
 //
-// `Execute(..., dryRun: true)` runs the SAME indexing + closure without writing or baking, so the UI's
-// ESPFE/ESP projection is the engine's own count, never a parallel estimate.
+// QA at the origin: a face whose FaceGen mesh OR tint cannot be found — in the source's own folder (loose or
+// BSA), then in any other installed mod folder (a patch plugin's unchanged faces live in the original mod's
+// folder) — is NOT built (it would be the dark-face bug in game) and is listed with the reason.
+//
+// Stable IDs: `Options.PinnedFaces/PinnedRecords` (from the library registry) fix the FormID of a donor /
+// copied record across rebuilds, so SkyPatcher configs made against an older build keep working; new ones
+// are allocated above `NextFree`. `Execute(..., dryRun: true)` runs the SAME indexing + closure without
+// writing or baking, so the UI's projection is the engine's own count, never a parallel estimate.
 static class LibraryBuild
 {
     static readonly HashSet<string> Base = Classify.BaseMasters;
+    // the ESL-flagged plugin's whole space. FDA_ID_LIMIT (hex) lowers the top — test hook to exercise the
+    // multi-plugin packing without a 2048-record fixture.
+    public const uint FirstId = 0x800;
+    public static readonly uint LastId = uint.TryParse(Environment.GetEnvironmentVariable("FDA_ID_LIMIT"), System.Globalization.NumberStyles.HexNumber, null, out var lim) && lim > FirstId ? lim : 0xFFF;
 
-    // AssetDirs = mod folders searched for the sources' masters (always) and, when BakeCrossMod, for a face's
-    // brow/eye/hair textures that live in other packs.
     public record Options(string Game, string OutFolder, string OutName, List<string> Sources, HashSet<string>? Include,
-                          List<string> AssetDirs, string? MapPath, bool BakeCrossMod = true, bool Bsa = false);
+                          List<string> AssetDirs, string? MapPath, bool BakeCrossMod = true, bool Bsa = false,
+                          Dictionary<string, uint>? PinnedFaces = null, Dictionary<string, uint>? PinnedRecords = null,
+                          string ReadmeName = "README.txt");
+    public record Skipped(string Key, string Source, string Npc, string Name, string Reason);
     public record Result(int Donors, int NewRecords, bool Esl, Dictionary<string, int> CopiedByType, List<string> Masters,
                          List<string> ExtraMasters, Dictionary<string, int> Unresolved, List<string> MissingMasters, int Baked,
-                         List<string> MissingFaceGen, int DanglingDropped, Dictionary<string, int> FacesPerPlugin,
-                         Dictionary<string, Library.RaceCount> FacesPerRace, string? Esp, List<string> BsaNotes);
+                         List<Skipped> SkippedFaces, int DanglingDropped, Dictionary<string, int> FacesPerPlugin,
+                         Dictionary<string, Library.RaceCount> FacesPerRace, string? Esp, List<string> BsaNotes,
+                         Dictionary<string, uint> FaceIds, Dictionary<string, uint> RecordIds,   // what this build allocated/used (face key / source FormKey -> ID)
+                         Dictionary<string, Dictionary<string, Library.RaceCount>> DonorMods,   // source plugin -> race -> counts (README "donor mods")
+                         Dictionary<string, string> FaceGenFrom,                                 // face key -> other mod folder its FaceGen came from
+                         List<string> Dummies, bool Overflow = false);                           // dry run only: the faces do not fit the ID space (split needed)
 
     public static int Run(string[] args)
     {
@@ -51,35 +66,41 @@ static class LibraryBuild
             }
         if (game is null || outFolder is null || outName is null || sources.Count == 0)
         { Console.Error.WriteLine("need --game --out --name and at least one --source"); return 1; }
-        var include = includePath is not null && File.Exists(includePath)
-            ? new HashSet<string>(File.ReadAllLines(includePath).Select(l => l.Trim()).Where(l => l.Length > 0), StringComparer.OrdinalIgnoreCase)
-            : null;
-        var assetDirs = assetDirsPath is not null && File.Exists(assetDirsPath)
-            ? File.ReadAllLines(assetDirsPath).Select(l => l.Trim()).Where(l => l.Length > 0 && Directory.Exists(l)).ToList()
-            : new List<string>();
+        var include = ReadLines(includePath) is { } inc ? new HashSet<string>(inc, StringComparer.OrdinalIgnoreCase) : null;
+        var assetDirs = ReadLines(assetDirsPath)?.Where(Directory.Exists).ToList() ?? new List<string>();
 
         Result r;
         try { r = Execute(new Options(game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod, bsa), dryRun: false); }
         catch (InvalidOperationException e) { Console.Error.WriteLine(e.Message); return 1; }
+        Report(r, outName, sources.Count, mapPath);
+        return 0;
+    }
 
+    public static List<string>? ReadLines(string? path) =>
+        path is not null && File.Exists(path) ? File.ReadAllLines(path).Select(l => l.Trim()).Where(l => l.Length > 0).ToList() : null;
+
+    public static void Report(Result r, string outName, int sourceCount, string? mapPath)
+    {
         var byType = string.Join(", ", r.CopiedByType.OrderByDescending(k => k.Value).Select(k => $"{k.Value} {k.Key}"));
         if (r.DanglingDropped > 0) Console.WriteLine($"Dropped {r.DanglingDropped} dangling link(s) to records that do not exist in their plugin (broken in the source; the game ignores them too).");
-        Console.WriteLine($"Library build {outName}: {r.Donors} donor faces from {sources.Count} source(s); copied {byType}; {r.Baked} assets baked.");
+        Console.WriteLine($"Library build {outName}: {r.Donors} donor faces from {sourceCount} source(s); copied {byType}; {r.Baked} assets baked.");
+        if (r.SkippedFaces.Count > 0) Console.WriteLine($"QA: {r.SkippedFaces.Count} face(s) NOT built (no FaceGen found) — listed in the README.");
+        if (r.FaceGenFrom.Count > 0) Console.WriteLine($"QA: {r.FaceGenFrom.Count} face(s) took their FaceGen from another mod folder (patch plugins) — listed in the README.");
         Console.WriteLine($"Output is {(r.Esl ? "ESL-flagged (ESPFE)" : "a FULL ESP")} — {r.NewRecords} new records.");
         Console.WriteLine("Masters: " + string.Join(", ", r.Masters) + (r.ExtraMasters.Count == 0 ? "  (base game only — fully self-contained)" : "  <- NOTE non-vanilla masters remain, see README"));
         if (r.MissingMasters.Count > 0) Console.WriteLine("WARNING masters not found: " + string.Join(", ", r.MissingMasters));
-        if (r.MissingFaceGen.Count > 0) Console.WriteLine($"missingFaceGen={r.MissingFaceGen.Count}: " + string.Join("; ", r.MissingFaceGen.Take(6)));
         foreach (var n in r.BsaNotes) Console.WriteLine(n);
         var stem = Path.GetFileNameWithoutExtension(outName);
         Console.WriteLine($"Wrote {r.Esp} + {stem}_map.yaml/.csv" + (mapPath is not null ? $" (+ {mapPath})" : ""));
-        return 0;
     }
 
     public static Result Execute(Options o, bool dryRun)
     {
-        var (game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod, packBsa) = o;
-        var resolver = crossMod && assetDirs.Count > 0
-            ? new LoadOrderAssets(assetDirs.Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList()) : null;
+        var (game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod, packBsa, pinnedFaces, pinnedRecords, readmeName) = o;
+        pinnedFaces ??= new(StringComparer.OrdinalIgnoreCase); pinnedRecords ??= new(StringComparer.OrdinalIgnoreCase);
+        // ALL mod folders are searched for masters and FaceGen; the cross-mod texture resolver only when asked.
+        var finder = assetDirs.Count > 0 ? new LoadOrderAssets(assetDirs.Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList()) : null;
+        var resolver = crossMod ? finder : null;
 
         var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
         var raceName = esm.Races.ToDictionary(r => r.FormKey, r => r.EditorID ?? "");
@@ -91,6 +112,27 @@ static class LibraryBuild
         var assets = new Dictionary<string, SourceAssets>(StringComparer.OrdinalIgnoreCase);
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int bakedAssets = 0;
+
+        // ---- FormID allocation: pinned IDs (registry) are honoured and reserved even when not reached this
+        // time (tombstones keep old configs valid); everything else is allocated from the lowest free ID.
+        var reserved = new HashSet<uint>(pinnedFaces.Values.Concat(pinnedRecords.Values));
+        uint cursor = FirstId;
+        var faceIds = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        var recordIds = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+        bool overflow = false; uint overflowSeq = 0x100000;   // dry-run placeholders: unique, outside any real range, never written
+        uint Alloc()
+        {
+            while (cursor <= LastId && reserved.Contains(cursor)) cursor++;
+            if (cursor > LastId)
+            {
+                // a dry run keeps going (so the QA list and the face set stay complete) and reports Overflow —
+                // the set planner then splits; a real build must never get here
+                if (dryRun) { overflow = true; return overflowSeq++; }
+                throw new InvalidOperationException("FormID space exhausted (2048 records incl. reserved) — split the build");
+            }
+            reserved.Add(cursor);
+            return cursor++;
+        }
 
         // ---- index every non-vanilla record of the sources AND of their non-vanilla masters (a CS_Foundation
         // face's body lives in CS_Visions.esp). Masters first, then the source, so a source's override of its
@@ -177,12 +219,15 @@ static class LibraryBuild
             Bake(folder, rel);
         }
 
-        // ---- donors: one never-placed NPC per included face, the source's exact face fields.
+        // ---- donors: one never-placed NPC per included face, the source's exact face fields — but ONLY when
+        // its FaceGen (mesh AND tint) exists: the source's own folder first, then any installed mod folder.
         var map = new LibraryMap { Plugin = outName, Built = DateTime.Now.ToString("yyyy-MM-dd HH:mm") };
         var donors = new List<(Npc npc, INpcGetter src, string sp, string folder)>();
-        var missingFaceGen = new List<string>();
+        var skipped = new List<Skipped>();
+        var faceGenFrom = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var facesPerPlugin = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var facesPerRace = new Dictionary<string, Library.RaceCount>(StringComparer.OrdinalIgnoreCase);
+        var donorMods = new Dictionary<string, Dictionary<string, Library.RaceCount>>(StringComparer.OrdinalIgnoreCase);
         int seq = 0;
         foreach (var sp in sources)
         {
@@ -195,7 +240,34 @@ static class LibraryBuild
                 var id = Faces.FaceId(sp, s.FormKey);
                 if (include is not null && !include.Contains(id)) continue;
                 if (LoadOrderScan.IsPlayerOrPreset(s)) continue;
-                var fk = outMod.GetNextFormKey();
+                // QA: traits inherited from a template = no face of its own (the user's audit: ~40% of the "missing
+                // FaceGen" cases were these) — listed with that reason rather than as a FaceGen problem.
+                if (s.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !s.Template.IsNull)
+                {
+                    skipped.Add(new Skipped(id, name, s.EditorID ?? "", s.Name?.String ?? "", "traits inherited from a template (no face of its own) — not a harvestable face"));
+                    continue;
+                }
+
+                // QA: FaceGen must exist, or the face is the dark-face bug in game — not built, listed.
+                var sub = s.FormKey.ModKey.FileName.ToString(); var hex = "00" + s.FormKey.ID.ToString("x6");
+                var nifRel = Path.Combine("meshes", "actors", "character", "facegendata", "facegeom", sub, hex + ".nif");
+                var ddsRel = Path.Combine("textures", "actors", "character", "facegendata", "facetint", sub, hex + ".dds");
+                bool ownNif = assets[folder].Has(nifRel), ownDds = assets[folder].Has(ddsRel);
+                string? otherNif = ownNif ? null : finder?.ResolveName(nifRel), otherDds = ownDds ? null : finder?.ResolveName(ddsRel);
+                if (!ownNif && otherNif is null || !ownDds && otherDds is null)
+                {
+                    var why = (!ownNif && otherNif is null ? "FaceGen mesh (facegeom nif) not found" : "")
+                            + (!ownNif && otherNif is null && !ownDds && otherDds is null ? "; " : "")
+                            + (!ownDds && otherDds is null ? "face tint (facetint dds) not found" : "")
+                            + (" — looked in the source's folder" + (finder is not null ? " and every installed mod folder" : ""));
+                    skipped.Add(new Skipped(id, name, s.EditorID ?? "", s.Name?.String ?? "", why));
+                    continue;
+                }
+                if (otherNif is not null || otherDds is not null) faceGenFrom[id] = otherNif ?? otherDds!;
+
+                uint fid = pinnedFaces.TryGetValue(id, out var pf) ? pf : Alloc();
+                faceIds[id] = fid;
+                var fk = new FormKey(outMod.ModKey, fid);
                 var d = new Npc(fk, GameCfg.Release) { EditorID = $"FDAdonor{seq++:D4}_{s.EditorID}", Name = s.Name?.String, Height = s.Height, Weight = s.Weight };
                 d.Configuration.Flags = (Fem(s) ? NpcConfiguration.Flag.Female : 0) | NpcConfiguration.Flag.Unique;
                 d.Race.SetTo(s.Race.FormKey);
@@ -211,18 +283,24 @@ static class LibraryBuild
                 outMod.Npcs.Add(d);
                 if (!dryRun)
                 {
-                    var fg = Generate.CopyFaceGen(assets[folder], s.FormKey.ModKey.FileName, s.FormKey.ID, fk.ID, outFolder, outName);
-                    if (fg is null) missingFaceGen.Add($"{d.EditorID} <= {s.EditorID} ({name})");
-                    else foreach (var tex in Generate.DdsPathsInNif(fg)) Bake(folder, tex);
+                    var nif = ownNif ? assets[folder].Get(nifRel) : finder!.ResolveBytes(nifRel);
+                    var dds = ownDds ? assets[folder].Get(ddsRel) : finder!.ResolveBytes(ddsRel);
+                    var tName = "00" + fid.ToString("x6");
+                    Generate.WriteBytes(outFolder, Path.Combine("meshes", "actors", "character", "facegendata", "facegeom", outName, tName + ".nif"), nif!);
+                    Generate.WriteBytes(outFolder, Path.Combine("textures", "actors", "character", "facegendata", "facetint", outName, tName + ".dds"), dds!);
+                    foreach (var tex in Generate.DdsPathsInNif(nif!)) Bake(folder, tex);
                 }
                 donors.Add((d, s, sp, folder));
                 facesPerPlugin[name]++;
                 var pr = Base.Contains(s.FormKey.ModKey.FileName) && esmNpcRace.TryGetValue(s.FormKey, out var vr0) ? RaceOf(vr0) : RaceOf(s.Race.FormKey);
                 if (!facesPerRace.TryGetValue(pr, out var rc)) facesPerRace[pr] = rc = new Library.RaceCount();
                 if (Fem(s)) rc.F++; else rc.M++;
+                if (!donorMods.TryGetValue(name, out var dm)) donorMods[name] = dm = new(StringComparer.OrdinalIgnoreCase);
+                if (!dm.TryGetValue(pr, out var dc)) dm[pr] = dc = new Library.RaceCount();
+                if (Fem(s)) dc.F++; else dc.M++;
             }
         }
-        if (donors.Count == 0) throw new InvalidOperationException("no faces to build (empty selection?)");
+        if (donors.Count == 0) throw new InvalidOperationException("no faces to build (empty selection, or every face failed the FaceGen check)");
 
         // ---- transitive closure: every non-vanilla record the donors reach, copied in and re-linked. A type
         // outside the allow-list (spells, factions, outfits, packages...) is deliberately NOT copied — it is
@@ -249,10 +327,13 @@ static class LibraryBuild
         var remap = new Dictionary<FormKey, FormKey>();
         var copiedByType = new Dictionary<string, int>();
         var bakeLater = new List<Action>();
-        foreach (var fk in toCopy)
+        foreach (var fk in toCopy.OrderBy(k => k.ToString(), StringComparer.OrdinalIgnoreCase))   // deterministic order => deterministic new IDs
         {
             var (src, folder) = rec[fk];
-            var nfk = outMod.GetNextFormKey();
+            var key = fk.ToString();
+            var nid = pinnedRecords.TryGetValue(key, out var pr) ? pr : Alloc();
+            recordIds[key] = nid;
+            var nfk = new FormKey(outMod.ModKey, nid);
             var dup = src.Duplicate(nfk);
             switch (dup)
             {
@@ -310,6 +391,7 @@ static class LibraryBuild
         missingMasters = missingMasters.Where(m => unresolved.ContainsKey(m)).ToList();   // only matters if still pointed at
 
         int newRecs = outMod.EnumerateMajorRecords().Count(r => r.FormKey.ModKey == outMod.ModKey);
+        // ESL: every ID (incl. reserved tombstones) must sit in 0x800-0xFFF — Alloc guarantees it or throws.
         outMod.IsSmallMaster = newRecs <= 2048;
 
         if (dryRun)
@@ -317,7 +399,8 @@ static class LibraryBuild
             foreach (var l in loaded.Values) if (l.mod is IDisposable dd) { try { dd.Dispose(); } catch { } }
             var extra = unresolved.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
             return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, new List<string>(), extra, unresolved,
-                              missingMasters, 0, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, null, new List<string>());
+                              missingMasters, 0, skipped, danglingDropped, facesPerPlugin, facesPerRace, null, new List<string>(),
+                              faceIds, recordIds, donorMods, faceGenFrom, new List<string>(), overflow);
         }
 
         // ---- write (ESL when the record count fits), re-read masters, map, README
@@ -353,6 +436,7 @@ static class LibraryBuild
         // the loose files stay (they override a BSA anyway) and the archives are removed.
         var bsaNotes = new List<string>();
         var dummyPlugins = new SortedSet<int>();
+        var dummies = new List<string>();
         if (packBsa)
         {
             string OwnerStem(int i) => i == 0 ? stem : $"{stem}_{i + 1}";
@@ -400,6 +484,7 @@ static class LibraryBuild
                 dummy.ModHeader.Author = "FaceDiversityApp";
                 dummy.ModHeader.Description = $"Empty ESL-flagged plugin whose only job is to make the game load {OwnerStem(i)}.bsa / \"{OwnerStem(i)} - Textures.bsa\" (overflow archives of {outName}). Keep it enabled with {outName}.";
                 dummy.WriteToBinary(Path.Combine(outFolder, dk.FileName), new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
+                dummies.Add(dk.FileName);
                 bsaNotes.Add($"Dummy plugin {dk.FileName} written (empty, ESL-flagged): enable it alongside {outName} so its archives load.");
             }
         }
@@ -410,6 +495,7 @@ static class LibraryBuild
         rd.Append("tints, morphs, weight and skin with the source's FaceGen re-keyed under this plugin. Everything they reference\n");
         rd.Append("from the source mods was copied in: " + string.Join(", ", copiedByType.OrderByDescending(k => k.Value).Select(k => $"{k.Value} {k.Key}")) + $"; {bakedAssets} meshes/textures baked.\n");
         rd.Append($"Plugin type: {(outMod.IsSmallMaster ? $"ESL-flagged (ESPFE), {newRecs} new records" : $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit (uses a load-order slot)")}.\n\n");
+        rd.Append("DONOR MODS in this plugin (faces per race):\n" + DonorModsText(donorMods) + "\n");
         rd.Append("MASTERS:\n" + string.Join("\n", masters.Select(m => "  - " + m)) + "\n");
         if (extraMasters.Count > 0)
             rd.Append("  NOTE — records of a kind this build does not copy (spells, factions, outfits, packages...) are still referenced\n"
@@ -428,10 +514,32 @@ static class LibraryBuild
                     + "this name (no MO2 Archives-tab step). A loose file with the same path would override them."
                     + (dummyPlugins.Count > 0 ? "\n  A group over the 4 GiB per-archive limit was split: the extra archives hang off empty ESL-flagged dummy\n  plugins named below — ENABLE THEM TOO (they use no load-order slot)." : "")
                     + "\n  " + string.Join("\n  ", bsaNotes) + "\n");
-        if (missingFaceGen.Count > 0) rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
-        File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
+        rd.Append(QaText(skipped, faceGenFrom));
+        File.WriteAllText(Path.Combine(outFolder, readmeName), rd.ToString());
 
         return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, masters, extraMasters, unresolved,
-                          missingMasters, bakedAssets, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, esp, bsaNotes);
+                          missingMasters, bakedAssets, skipped, danglingDropped, facesPerPlugin, facesPerRace, esp, bsaNotes,
+                          faceIds, recordIds, donorMods, faceGenFrom, dummies);
+    }
+
+    // "  NorthernWomen.esp — 47 faces (32 Nord, 15 Imperial)"
+    public static string DonorModsText(Dictionary<string, Dictionary<string, Library.RaceCount>> donorMods) =>
+        string.Join("\n", donorMods.OrderByDescending(m => m.Value.Sum(r => r.Value.F + r.Value.M)).ThenBy(m => m.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(m => $"  {m.Key} — {m.Value.Sum(r => r.Value.F + r.Value.M)} faces ("
+                        + string.Join(", ", m.Value.OrderByDescending(r => r.Value.F + r.Value.M).Select(r => $"{r.Value.F + r.Value.M} {(r.Key.Contains(':') ? "custom race " + r.Key : r.Key.Replace("Race", ""))}{(r.Value.M > 0 ? $" [{r.Value.M}M]" : "")}"))
+                        + ")"));
+
+    public static string QaText(List<Skipped> skipped, Dictionary<string, string> faceGenFrom)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (faceGenFrom.Count > 0)
+            sb.Append($"\nQA — {faceGenFrom.Count} face(s) took their FaceGen from ANOTHER mod folder (the source plugin ships none; typical for a patch\n"
+                    + "plugin whose faces are unchanged). Built normally; listed so you can confirm the face you get is the one you picked:\n"
+                    + string.Join("\n", faceGenFrom.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase).Select(k => $"  {k.Key}  <-  {k.Value}")) + "\n");
+        if (skipped.Count > 0)
+            sb.Append($"\nQA — {skipped.Count} face(s) NOT BUILT: no FaceGen found anywhere, so they would render as the dark-face bug. Check the\n"
+                    + "source mod (missing/unpacked FaceGen, a BSA not installed, a replacer that expects another mod's files) and rebuild:\n"
+                    + string.Join("\n", skipped.Select(s => $"  {s.Source}  {s.Npc} \"{s.Name}\"  ({s.Key}) — {s.Reason}")) + "\n");
+        return sb.ToString();
     }
 }

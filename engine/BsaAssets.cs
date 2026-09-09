@@ -47,6 +47,16 @@ sealed class SourceAssets
     }
     static byte[] Bytes(IArchiveFile f) { using var s = f.AsStream(); using var ms = new MemoryStream(); s.CopyTo(ms); return ms.ToArray(); }
 
+    // Existence only (loose or BSA) — no bytes read; used for the FaceGen QA flag on every harvested face.
+    public bool Has(string rel)
+    {
+        if (File.Exists(Path.Combine(folder, rel))) return true;
+        var r = Norm(rel);
+        if (bsa.ContainsKey(r)) return true;
+        var ar = AsciiFold(r);
+        return ar != r && bsaAscii.ContainsKey(ar);
+    }
+
     public byte[]? Get(string rel)
     {
         var loose = Path.Combine(folder, rel);

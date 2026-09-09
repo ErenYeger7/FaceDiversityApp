@@ -225,12 +225,12 @@ static class Generate
         {
             var map = LibraryMap.Load(lm);
             if (map is null) { Console.WriteLine($"library map not found/invalid: {lm} — skipped"); continue; }
-            var libKey = ModKey.FromNameAndExtension(map.Plugin);
             int pooled = 0;
             foreach (var row in map.Faces)
             {
                 if (include is not null && !include.Contains(row.Key)) continue;
                 uint id; try { id = Convert.ToUInt32(row.Library, 16); } catch { continue; }
+                var libKey = ModKey.FromNameAndExtension(map.PluginOf(row));   // a SET spreads its donors over several plugins
                 bool fem = row.Sex.Equals("F", StringComparison.OrdinalIgnoreCase);
                 var n = new Npc(new FormKey(libKey, id), GameCfg.Release) { EditorID = row.EditorId, Name = row.Name, Weight = row.Weight };
                 n.Configuration.Flags = (fem ? NpcConfiguration.Flag.Female : 0) | NpcConfiguration.Flag.Unique;
@@ -253,10 +253,11 @@ static class Generate
                     }
                 pooled++;
             }
-            libraryPlugins.Add(map.Plugin);
             srcModes.Add((map.Plugin, "library", $"library build ({pooled} faces pooled) — self-contained, no source mods needed"));
             Console.WriteLine($"Library build {map.Plugin}: {pooled} faces pooled.");
         }
+        // The plugins a config ACTUALLY references are collected while lines are emitted (a set may hold three
+        // plugins of which a small config uses one) — see the runtime branch.
         // (RemapLinks deferred: we copy only the WORN source HDPTs after assignment, then remap.)
 
         var cursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -410,6 +411,7 @@ static class Generate
                 // from the DONOR NPC this plugin carries for the picked face (see Donor above) + race/skin/weight so
                 // head, body and race agree, + setFlags=female / voiceType when feminizing.
                 var dn = Donor(face);
+                if (face.Library && !libraryPlugins.Any(p => string.Equals(p, dn.FormKey.ModKey.FileName, StringComparison.OrdinalIgnoreCase))) libraryPlugins.Add(dn.FormKey.ModKey.FileName);
                 var baseOps = new List<string> { $"copyVisualStyle={dn.FormKey.ModKey.FileName}|{dn.FormKey.ID:X}" };   // this plugin, or the library build's
                 // Race must match the donor or the game can crash (SkyPatcher doc: "gender and race also match —
                 // those can also be modified with SkyPatcher"). A NATIVE draw adopts the donor's race exactly as
@@ -634,7 +636,7 @@ static class Generate
             Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
                               (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
         }
-        else Console.WriteLine($"No plugin written — every face comes from a library build ({string.Join(", ", libraryPlugins)}); the output is the SkyPatcher config only.");
+        else Console.WriteLine($"No plugin written — every face comes from a library build ({(libraryPlugins.Count > 0 ? string.Join(", ", libraryPlugins) + " referenced" : "no donor used")}); the output is the SkyPatcher config only.");
         if (skypatcher)
             Console.WriteLine($"SkyPatcher runtime mode: the plugin holds {donorByFace.Count} DONOR faces (never placed); {runtimeTargets.Count} targets get their face at load via copyVisualStyle from them (no overrides); {raceSwitched} adopt the donor's race via race=; {skinOps} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
 
