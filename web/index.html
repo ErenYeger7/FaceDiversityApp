@@ -92,6 +92,7 @@
   .blbtn:hover{opacity:.8}
   .blbtn.on{filter:none;opacity:1}
   select.asSel{width:auto;min-width:78px;padding:2px 4px;font-size:11px;background:var(--panel2)}
+  .b-library{background:rgba(75,191,115,.18);color:#b6e6c6}
   select.asSel.asSet{border-color:var(--accent);color:var(--accent)}
   /* face lightbox */
   #lightbox{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.85);display:flex;
@@ -260,6 +261,15 @@ window.addEventListener('unhandledrejection',function(ev){
         <div id="saveLibOut"></div>
       </div>
       <div class="card">
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">LIBRARY PLUGIN — self-contained face library</h3>
+        <div class="muted" style="margin-bottom:8px">Builds <b>one plugin</b> from every curated mod's whitelisted faces (blacklist applied): each face becomes a donor NPC with its FaceGen, head parts, custom race and skin <b>copied in</b>, so the plugin needs no source mods and travels between MO2 instances. In <b>Mod Creator</b> it appears as a source under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;build&gt;|&lt;donor&gt;</code>). Dated names tell you which build a config was made with.</div>
+        <label style="display:block;margin-bottom:6px">Plugin name <input id="libBuildName" style="width:100%" placeholder="FDA_Library_yymmdd.esp"></label>
+        <label class="chk"><input type="checkbox" id="libBuildBake" checked> <span>Bake cross-mod textures <span class="muted">(brows/eyes/hair a face takes from other packs; body skin at vanilla paths is never baked)</span></span></label>
+        <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build library plugin</button>
+        <div id="libBuildOut"></div>
+        <div id="libBuilds" class="muted" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
         <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">HOW THE LIBRARY IS USED</h3>
         <div class="muted">In <b>Mod Creator</b> mode, a source that has a saved whitelist contributes only its ticked faces; a source with none behaves exactly as before (all faces pooled). Globally-blacklisted NPCs (right) are removed from every source. The library lives on this PC only and is reused across modlists.</div>
       </div>
@@ -312,7 +322,7 @@ window.addEventListener('unhandledrejection',function(ev){
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
         <input type="checkbox" id="skypatcherMode">
-        <span>Build as SkyPatcher file <span class="muted">(self-contained face library) — targets are NOT overridden; each picked face becomes a donor NPC inside the plugin (its FaceGen included, head parts copied for disable/standalone sources) and is applied at load via copyVisualStyle, so it coexists with other mods editing the same NPCs, ignores load-order winners, and travels between MO2 instances</span></span>
+        <span>Build as SkyPatcher file <span id="skyLockNote" class="muted"></span> <span class="muted">(self-contained face library) — targets are NOT overridden; each picked face becomes a donor NPC inside the plugin (its FaceGen included, head parts copied for disable/standalone sources) and is applied at load via copyVisualStyle, so it coexists with other mods editing the same NPCs, ignores load-order winners, and travels between MO2 instances</span></span>
       </label>
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
@@ -631,20 +641,33 @@ async function addSource(path, plugin){
   const modFolder = path.split(/[\\/]/).slice(-2,-1)[0] || '';   // mod-manager folder — matched to a mugshot pack folder
   state.sources.push({ path, plugin, sourceMod:modFolder, mode:cls.mode, femaleNpcs:cls.femaleNpcs, why:cls.why, ownHdpt:cls.ownHdpt||0,
     usesCustomRace:!!cls.usesCustomRace, shipsRaceTextures:!!cls.shipsRaceTextures, hasBsa:!!cls.hasBsa });
+  syncLibraryLock();
   renderSources(); renderModPick(); await refreshFaces();
 }
 window.addSource = addSource;
 
 function removeSource(path){
   state.sources = state.sources.filter(s=>s.path!==path);
+  syncLibraryLock();
   renderSources(); renderModPick(); refreshFaces();
 }
 window.removeSource = removeSource;
 
+// A library build has no NPC records to override with — it can only feed a SkyPatcher config. While one is
+// among the sources, runtime mode is forced on (and locked).
+function hasLibrarySource(){ return state.sources.some(s=>s.mode==='library'); }
+function syncLibraryLock(){
+  const c=$('#skypatcherMode'); if(!c) return;
+  const lock = hasLibrarySource();
+  if(lock && !c.checked){ c.checked=true; applySkyMode(); }
+  c.disabled = lock;
+  $('#skyLockNote').textContent = lock ? '(forced on: a library build is a source)' : '';
+}
+
 function setMode(path, mode){ const s=state.sources.find(x=>x.path===path); if(s){ s.mode=mode; renderSources(); renderCoverage(); } }
 window.setMode = setMode;
 
-const MODE_LABEL = { keep:'keep · mod stays on', disable:'disable · origin ESP off', standalone:'standalone · mod removable' };
+const MODE_LABEL = { keep:'keep · mod stays on', disable:'disable · origin ESP off', standalone:'standalone · mod removable', library:'library build' };
 const MODE_HELP =
   'keep — origin mod + its ESP stay enabled; the output masters it (references its head parts, skin & assets). '
  +'Use when the source has custom races, ships head/skin textures, or packs assets in a BSA.\n\n'
@@ -660,9 +683,9 @@ function renderSources(){
     <div class="src">
       <span class="badge b-${s.mode}">${s.mode.toUpperCase()}</span>
       <span class="name" title="${esc(s.path)}\n${esc(s.why||'')}">${esc(s.plugin)} <span class="muted">· ${s.femaleNpcs} F</span></span>
-      <select title="${esc(MODE_HELP)}" onchange="setMode('${jsq(s.path)}',this.value)">
+      ${s.mode==='library' ? `<span class="muted" title="${esc(s.why||'')}">self-contained · SkyPatcher only</span>` : `<select title="${esc(MODE_HELP)}" onchange="setMode('${jsq(s.path)}',this.value)">
         ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
-      </select>
+      </select>`}
       <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
     </div>${mugshotRow(s)}${(()=>{const su=summaryText(summaryForPlugin(s.plugin)); return su?`<div class="lsum" title="${esc(su.title)}">📚 library coverage — ${esc(su.text)}</div>`:'';})()}${canDisable(s)?`<div class="muted" style="margin:-2px 0 6px 6px;font-size:11px;color:#a9c9ff">↳ kept only to avoid unpacking its BSA — you can set it <b>disable</b> (turn its ESP off to avoid conflicts) if you force-load its BSA in MO2, or <b>standalone</b> to bake its assets in.</div>`:''}`).join('');
 }
@@ -717,10 +740,10 @@ async function refreshFaces(){
   const prevIds = new Set(state.faces.map(f=>f.id));     // faces we already knew about
   const prevSel = state.selected;                        // and their selection state
   if(!state.sources.length){ state.faces=[]; state.selected=new Set(); renderSourceFilter(); renderRaceFilter(); renderFaces(); renderCoverage(); renderLibSummary(); return; }
-  const qs = state.sources.map(s=>'source='+encodeURIComponent(s.path)).join('&');
+  // POST, not a query string: many multi-esp mods overflow the server's 16 KB URL limit ("request too long").
   // Creator honors the library (whitelist narrows the pool, blacklist drops NPCs); curation must see all.
-  const lib = state.mode==='creator' ? '&library=1' : '';
-  state.faces = await api('/api/faces?'+qs+lib);
+  state.faces = await api('/api/faces',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ sources: state.sources.map(s=>s.path), library: state.mode==='creator' })});
   state.selected = new Set();
   if(state.mode==='library'){
     await ensureWhitelists();
@@ -966,10 +989,13 @@ function renderCoverage(){
   if(isRuntime()){
     // Runtime: one DONOR NPC per selected usable face (+ the worn head parts of disable/standalone sources, as
     // above) — those are the new records; targets are not overridden. Same ESL rule as the engine.
-    const donors = state.faces.filter(f=>state.selected.has(f.id) && faceUsable(f)).length;
+    const picked = state.faces.filter(f=>state.selected.has(f.id) && faceUsable(f));
+    const fromLib = picked.filter(f=>f.library).length, donors = picked.length - fromLib;
     const rtRecs = donors + hdptNew, rtEsl = rtRecs <= 2048;
     $('#eslProj').innerHTML = state.sources.length
-      ? `<div class="warnbox" style="${rtEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">SkyPatcher runtime: <b>${donors}</b> donor NPC${donors===1?'':'s'} (one per picked face, FaceGen included) + <b>${hdptNew}</b> worn head parts = <b>${rtRecs}</b> new records → <b>${rtEsl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>. Targets are <b>not overridden</b>; they get their look at load via <code>copyVisualStyle</code> from the donors. Keep sources stay masters; disable/standalone sources are copied in.</div>`
+      ? (rtRecs === 0 && fromLib > 0
+        ? `<div class="warnbox" style="background:rgba(75,191,115,.1);border-color:rgba(75,191,115,.35);color:#b6e6c6">SkyPatcher runtime from the <b>library build</b>: <b>${fromLib}</b> faces referenced directly — <b>no plugin</b> is written, the output is the SkyPatcher config alone (keep the build installed and enabled).</div>`
+        : `<div class="warnbox" style="${rtEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">SkyPatcher runtime: <b>${donors}</b> donor NPC${donors===1?'':'s'} (one per picked face, FaceGen included) + <b>${hdptNew}</b> worn head parts = <b>${rtRecs}</b> new records → <b>${rtEsl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>${fromLib?` · plus <b>${fromLib}</b> faces referenced from the library build`:''}. Targets are <b>not overridden</b>; they get their look at load via <code>copyVisualStyle</code> from the donors. Keep sources stay masters; disable/standalone sources are copied in.</div>`)
       : '';
     $('#boost').checked=false; $('#boost').disabled=true; $('#boostNote').textContent='(N/A in SkyPatcher runtime mode)';
   }
@@ -1175,6 +1201,29 @@ function renderLibSummary(){
   }).join('');
   if(btn) btn.disabled=false;
 }
+// ---------- library plugin build ----------
+function defaultLibName(){ const d=new Date(), p=n=>String(n).padStart(2,'0'); return `FDA_Library_${String(d.getFullYear()).slice(2)}${p(d.getMonth()+1)}${p(d.getDate())}.esp`; }
+async function refreshLibBuilds(){
+  const el=$('#libBuilds'); if(!el) return;
+  let builds=[]; try{ builds = await api('/api/library/builds'); }catch{ builds=[]; }
+  el.innerHTML = builds.length
+    ? '<div style="margin-bottom:4px">Existing builds:</div>' + builds.map(b=>`<div class="stat"><span title="${esc(b.map)}">${esc(b.plugin)} <span class="muted">· ${esc(b.built||'')}</span></span><b>${b.faces} faces</b></div>`).join('')
+    : 'No library build yet.';
+}
+async function buildLibrary(){
+  const btn=$('#libBuildBtn'), out=$('#libBuildOut');
+  btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> building the library plugin (copies records + FaceGen + textures; can take a few minutes)…</div>';
+  let res;
+  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||null, bakeTextures:$('#libBuildBake').checked })}); }
+  catch(e){ res={ ok:false, log:'request failed: '+(e&&e.message?e.message:e) }; }
+  out.innerHTML = `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ built':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}</div>`
+    + `<pre class="log">${esc(res.log||'')}</pre>`
+    + (res.readme?`<details><summary class="muted">README.txt</summary><pre class="log">${esc(res.readme)}</pre></details>`:'');
+  btn.disabled=false;
+  refreshLibBuilds(); scanMods();   // the build now shows up as a source
+}
+if($('#libBuildBtn')){ $('#libBuildBtn').onclick = buildLibrary; $('#libBuildName').placeholder = defaultLibName(); refreshLibBuilds(); }
+
 async function saveLibrary(){
   if(!state.sources.length) return;
   const btn=$('#saveLibBtn'), out=$('#saveLibOut');

@@ -126,24 +126,57 @@ static class Serve
                 case "/api/mods":
                 {
                     var mp = q["mods"]; var pf = q["profile"];
-                    Send(ctx, 200, "application/json",
-                        Json(ScanMods(string.IsNullOrWhiteSpace(mp) ? Mods : mp!,
-                                      pf is null ? Profile : (pf.Length == 0 ? null : pf)))); return;
+                    var mods = ScanMods(string.IsNullOrWhiteSpace(mp) ? Mods : mp!, pf is null ? Profile : (pf.Length == 0 ? null : pf));
+                    // Library builds appear as a pseudo-mod at the top: one "plugin" per build, addressed as
+                    // <builds dir>\<plugin>.esp so the picker/addSource/faces flow needs no special casing.
+                    var builds = LibraryMap.List();
+                    if (builds.Count > 0)
+                    {
+                        var sums = new Dictionary<string, Dictionary<string, Library.RaceCount>>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var b in builds) if (LibraryMap.Load(b.Map) is { } m) sums[b.Plugin] = LibraryMap.Summary(m);
+                        mods.Insert(0, new ModEntry("Library builds (self-contained face plugins)", LibraryMap.BuildsDir(), builds.Select(b => b.Plugin).ToArray(), true, -1, sums));
+                    }
+                    Send(ctx, 200, "application/json", Json(mods)); return;
                 }
                 case "/api/classify":
                 {
                     var src = q["source"];
                     if (src is null) { Send(ctx, 400, "application/json", Json(new { error = "source required" })); return; }
+                    if (LibraryMap.IsLibraryPath(src))
+                    {
+                        var m = LibraryMap.Load(LibraryMap.MapPathFor(src));
+                        Send(ctx, 200, "application/json", Json(new
+                        {
+                            plugin = Path.GetFileName(src), folder = LibraryMap.BuildsDir(),
+                            femaleNpcs = m?.Faces.Count(f => f.Sex.Equals("F", StringComparison.OrdinalIgnoreCase)) ?? 0, ownHdpt = 0,
+                            overridesVanilla = false, usesCustomRace = false, hasBsa = false, shipsRaceTextures = false, faceGenLoose = true,
+                            mode = "library", why = "self-contained library build — its donors are referenced directly; no source mods needed; SkyPatcher runtime output only"
+                        })); return;
+                    }
                     Send(ctx, 200, "application/json", Json(Classify.Inspect(src))); return;
                 }
                 case "/api/faces":
                 {
-                    var srcs = q.GetValues("source") ?? Array.Empty<string>();
-                    var faces = Faces.Enumerate(Game, srcs);
-                    // Mod Creator Mode passes library=1 so the library curbs the pool: a source WITH a
-                    // whitelist is narrowed to its approved faces; a globally-blacklisted NPC is dropped
-                    // from every source. Library Mode omits the flag (it must see & curate everything).
-                    if (q["library"] == "1") faces = ApplyLibrary(faces);
+                    // GET ?source=..&source=.. (kept for curl/tests) or POST {sources:[...], library:bool} — the
+                    // UI POSTs: with many multi-esp mods the query string blew past HttpListener's 16 KB request
+                    // limit ("request too long").
+                    string[] srcs; bool applyLib;
+                    if (ctx.Request.HttpMethod == "POST")
+                    {
+                        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+                        FacesReq? fr;
+                        try { fr = JsonSerializer.Deserialize<FacesReq>(body, J); }
+                        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+                        srcs = fr?.Sources?.ToArray() ?? Array.Empty<string>(); applyLib = fr?.Library ?? false;
+                    }
+                    else { srcs = q.GetValues("source") ?? Array.Empty<string>(); applyLib = q["library"] == "1"; }
+                    var faces = Faces.Enumerate(Game, srcs.Where(s => !LibraryMap.IsLibraryPath(s)));
+                    foreach (var s in srcs.Where(LibraryMap.IsLibraryPath))
+                        if (LibraryMap.Load(LibraryMap.MapPathFor(s)) is { } lm) faces.AddRange(LibraryMap.ToFaces(lm));
+                    // Mod Creator Mode sets library so the library curbs the pool: a source WITH a whitelist is
+                    // narrowed to its approved faces; a globally-blacklisted NPC is dropped from every source.
+                    // Library Mode omits it (it must see & curate everything).
+                    if (applyLib) faces = ApplyLibrary(faces);
                     Send(ctx, 200, "application/json", Json(faces)); return;
                 }
                 case "/api/library/mod":
@@ -173,6 +206,8 @@ static class Serve
                     catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
                     return;
                 }
+                case "/api/library/builds": Send(ctx, 200, "application/json", Json(LibraryMap.List())); return;
+                case "/api/library/build" when ctx.Request.HttpMethod == "POST": HandleLibraryBuild(ctx); return;
                 case "/api/library/blacklist":
                 {
                     if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
@@ -440,6 +475,7 @@ static class Serve
         };
     }
 
+    record FacesReq(List<string>? Sources, bool Library = false);
     record GenSource(string Path, string? Mode);
     record GenReq(string? Category, List<GenSource>? Sources, List<string>? Include, string? Name, string? Out,
                   bool Feminize = true, bool Boost = false, bool Sexplague = false, List<int>? SexplaguePct = null,
@@ -508,10 +544,15 @@ static class Serve
         // whitelist file) contribute; the engine remaps only the faces it pools.
         string? raceOvFile = null;
         {
-            var lines = new List<string>();
-            foreach (var s in req.Sources)
+            var lines = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // A library build's faces keep their ORIGINAL plugin in their id, so the extra-race picks come from
+            // every original plugin the build holds.
+            IEnumerable<string> PluginsOf(GenSource s) =>
+                LibraryMap.IsLibraryPath(s.Path) && LibraryMap.Load(LibraryMap.MapPathFor(s.Path)) is { } lm
+                    ? lm.Faces.Select(f => f.Source).Distinct(StringComparer.OrdinalIgnoreCase)
+                    : new[] { Path.GetFileName(s.Path) };
+            foreach (var plugin in req.Sources.SelectMany(PluginsOf).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var plugin = Path.GetFileName(s.Path);
                 foreach (var kv in Library.LoadWhitelistOverrides(plugin))
                     lines.Add($"{plugin}#{kv.Key}\t{kv.Value}");
                 foreach (var kv in Library.LoadWhitelistServes(plugin))
@@ -526,6 +567,7 @@ static class Serve
         }
         foreach (var s in req.Sources)
         {
+            if (LibraryMap.IsLibraryPath(s.Path)) { a.Add("--library-map"); a.Add(LibraryMap.MapPathFor(s.Path)); continue; }
             var flag = s.Mode switch { "keep" => "--keep", "disable" => "--disable", "standalone" => "--standalone", _ => "--source" };
             a.Add(flag); a.Add(s.Path);
         }
@@ -541,16 +583,77 @@ static class Serve
     }
 
     // Run a command with stdout+stderr captured (single-threaded loop => no console race).
-    static (int code, string log) CaptureRun(string[] a)
+    static (int code, string log) CaptureRun(string[] a) => CaptureRun(a, Generate.Run);
+    static (int code, string log) CaptureRun(string[] a, Func<string[], int> cmd)
     {
         var sw = new StringWriter();
         var oldOut = Console.Out; var oldErr = Console.Error;
         Console.SetOut(sw); Console.SetError(sw);
         int code;
-        try { code = Generate.Run(a); }
+        try { code = cmd(a); }
         catch (Exception e) { sw.WriteLine("EXCEPTION: " + e); code = 1; }
         finally { Console.SetOut(oldOut); Console.SetError(oldErr); }
         return (code, sw.ToString());
+    }
+
+    // ---- library build: ONE self-contained plugin from every curated mod's whitelisted faces ----
+    record LibraryBuildReq(string? Name, bool BakeTextures = true);
+    static void HandleLibraryBuild(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        LibraryBuildReq? req;
+        try { req = JsonSerializer.Deserialize<LibraryBuildReq>(body, J) ?? new LibraryBuildReq(null); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        var name = string.IsNullOrWhiteSpace(req.Name) ? $"FDA_Library_{DateTime.Now:yyMMdd}.esp" : req.Name!.Trim();
+        if (!name.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)) name += ".esp";
+        var stem = Path.GetFileNameWithoutExtension(name);
+        var outFolder = Path.Combine(OutDir, stem);
+
+        // curated plugins = every whitelist file; locate each plugin among the installed mods (enabled or not —
+        // the build harvests files, it doesn't care about the load order); the include list = whitelisted keys
+        // minus the global blacklist, as face ids.
+        var modsDir = Path.Combine(Library.Root(), "mods");
+        var installed = ScanMods(Mods, null);
+        var blacklist = Library.LoadBlacklist();
+        var sources = new List<string>(); var include = new List<string>(); var notInstalled = new List<string>(); var empty = new List<string>();
+        if (Directory.Exists(modsDir))
+            foreach (var y in Directory.EnumerateFiles(modsDir, "*.yaml").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                var plugin = Path.GetFileNameWithoutExtension(y);   // "<plugin>.yaml" -> "<plugin>"
+                var keys = Library.LoadWhitelist(plugin) ?? new HashSet<string>();
+                var wanted = keys.Where(k => !blacklist.Contains(k)).ToList();
+                if (wanted.Count == 0) { empty.Add(plugin); continue; }
+                var mod = installed.FirstOrDefault(m => m.Plugins.Contains(plugin, StringComparer.OrdinalIgnoreCase));
+                if (mod is null) { notInstalled.Add(plugin); continue; }
+                sources.Add(Path.Combine(mod.Folder, plugin));
+                include.AddRange(wanted.Select(k => $"{plugin}#{k}"));
+            }
+        if (sources.Count == 0)
+        { Send(ctx, 400, "application/json", Json(new { error = "no curated faces to build: save at least one whitelist in Library mode" + (notInstalled.Count > 0 ? $" (curated but not installed here: {string.Join(", ", notInstalled)})" : "") })); return; }
+
+        var includeFile = Path.Combine(Path.GetTempPath(), $"facediv-libinc-{Guid.NewGuid():N}.txt");
+        File.WriteAllLines(includeFile, include);
+        // mod folders to find sources' masters + cross-mod textures in: enabled first (priority), then the rest
+        var profileDir = Path.Combine(Profiles, Profile);
+        var dirs = LoadOrderScan.EnabledMods(profileDir, Mods).Select(m => m.folder)
+            .Concat(LoadOrderScan.DisabledMods(profileDir, Mods).Select(m => m.folder)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var dirsFile = Path.Combine(Path.GetTempPath(), $"facediv-libdirs-{Guid.NewGuid():N}.txt");
+        File.WriteAllLines(dirsFile, req.BakeTextures ? dirs : dirs.Where(d => sources.Any(s => s.StartsWith(d, StringComparison.OrdinalIgnoreCase))));
+        var mapPath = Path.Combine(LibraryMap.BuildsDir(), stem + ".yaml");
+
+        var a = new List<string> { "build-library", "--game", Game, "--out", outFolder, "--name", name, "--include", includeFile, "--asset-dirs", dirsFile, "--map", mapPath };
+        foreach (var s in sources) { a.Add("--source"); a.Add(s); }
+        var (code, log) = CaptureRun(a.ToArray(), LibraryBuild.Run);
+        try { File.Delete(includeFile); File.Delete(dirsFile); } catch { }
+        var notes = new List<string>();
+        if (notInstalled.Count > 0) notes.Add("curated but NOT installed on this PC (skipped): " + string.Join(", ", notInstalled));
+        if (empty.Count > 0) notes.Add("curated with no faces ticked (skipped): " + string.Join(", ", empty));
+        var readme = Path.Combine(outFolder, "README.txt");
+        Send(ctx, code == 0 ? 200 : 500, "application/json", Json(new
+        {
+            ok = code == 0, log = (notes.Count > 0 ? string.Join("\n", notes) + "\n\n" : "") + log, outFolder, map = mapPath,
+            sources = sources.Count, faces = include.Count, readme = File.Exists(readme) ? File.ReadAllText(readme) : null
+        }));
     }
 
     // ---- mugshots manual override ----

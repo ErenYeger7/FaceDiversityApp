@@ -16,7 +16,8 @@ static class Faces
         string PoolRace, string NpcRace, string? Voice, bool CustomRace, string Sex, string SourceMod,
         string? As = null,    // library double-dip: an ADDITIONAL race this face also serves (overlay; set by ApplyLibrary)
         string[]? HeadPartKeys = null,    // head parts this face wears that live IN its source plugin (transitive via ExtraParts) — what a disable/standalone build deep-copies
-        string? Serve = null);            // library adopt: a vanilla race this CUSTOM-race face is pooled under; the target adopts the face's race (set by ApplyLibrary)
+        string? Serve = null,             // library adopt: a vanilla race this CUSTOM-race face is pooled under; the target adopts the face's race (set by ApplyLibrary)
+        bool Library = false);            // face comes from a LIBRARY BUILD (donor already in FDA_Library_*.esp) — no source mod, no records to copy
 
     // Race = the JOIN KEY, identical to FaceInfo.PoolRace (RaceOf: esm EditorID for vanilla, hex FormKey
     // for mod-added races) so demand rows line up with the harvested face pool. Name = pretty display

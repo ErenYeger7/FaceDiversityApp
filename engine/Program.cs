@@ -10,6 +10,7 @@ return (args.Length == 0 ? "" : args[0]) switch
     "analyze"    => Analyze.Run(args),
     "classify"   => Classify.Run(args),
     "generate"   => Generate.Run(args),
+    "build-library" => LibraryBuild.Run(args),
     "list-faces" => Faces.Run(args),
     "serve"      => Serve.Run(args),
     "scan-lo"    => ScanLo(args),

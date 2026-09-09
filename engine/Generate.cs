@@ -22,7 +22,9 @@ static class Generate
 {
     // Overlay = this pooling is a compat-group "also serve" (double-dip): the target keeps ITS race and
     // just wears this head-compatible face, so assignment must NOT SetTo the face's race.
-    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female, bool Overlay = false, string Source = "");
+    // Library = the face lives in a LIBRARY BUILD plugin already (Npc is a synthesized stand-in carrying the
+    // donor's FormKey/race/skin/weight); runtime lines reference it directly — nothing to copy or write.
+    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female, bool Overlay = false, string Source = "", bool Library = false);
     record VoiceRemap(Dictionary<string, List<string>> Direct, Dictionary<string, List<string>> Fallback);
     static string PoolKey(string race, bool female) => race + (female ? "|F" : "|M");
 
@@ -31,6 +33,7 @@ static class Generate
         string? game = null, category = "bandit", voiceMapPath = null, outFolder = null, outName = null;
         string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null, feminineHeightsPath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
+        var libraryMaps = new List<string>();   // --library-map: a library build's yaml — its donors are the faces (runtime mode only)
         bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false; bool feminineHeights = false;
         bool skypatcher = false;   // SkyPatcher runtime mode: donor NPCs in the plugin + copyVisualStyle lines; targets are not overridden
         for (int i = 1; i < args.Length; i++)
@@ -58,9 +61,12 @@ static class Generate
                 case "--bake-textures": bakeTextures = true; break;   // bake cross-mod face textures (brows/eyes/etc.) for self-contained output
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
                 case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
+                case "--library-map": libraryMaps.Add(args[++i]); break;     // faces from a self-contained library build (FDA_Library_*.esp)
             }
-        if (game is null || outFolder is null || outName is null || srcSpecs.Count == 0)
-        { Console.Error.WriteLine("need --game --out --name and at least one --source/--keep/--disable"); return 1; }
+        if (game is null || outFolder is null || outName is null || (srcSpecs.Count == 0 && libraryMaps.Count == 0))
+        { Console.Error.WriteLine("need --game --out --name and at least one --source/--keep/--disable/--library-map"); return 1; }
+        if (libraryMaps.Count > 0 && !skypatcher)
+        { Console.Error.WriteLine("A library build has no NPC records to override with — it can only feed a SkyPatcher runtime config. Enable 'Build as SkyPatcher file'."); return 1; }
 
         Categories.Load(configPath);
         // Head-compatibility groups for the merger, next to categories.yaml (base<->vampire by default).
@@ -209,6 +215,48 @@ static class Generate
                     }
             }
         }
+        // Library builds: the donors already exist in FDA_Library_*.esp. Each map row becomes a stand-in Npc
+        // carrying the donor's FormKey, race (copied into the library when custom), skin, weight and sex, pooled
+        // under the ORIGINAL pool race so targets, whitelists and `as:`/`serve:` behave exactly as for the source
+        // mod — without the source mod. Runtime lines then point straight at the library plugin.
+        var libraryPlugins = new List<string>();
+        var libOrigEid = new Dictionary<FormKey, string>();   // library donor -> original NPC EditorID (for the ini comment)
+        foreach (var lm in libraryMaps)
+        {
+            var map = LibraryMap.Load(lm);
+            if (map is null) { Console.WriteLine($"library map not found/invalid: {lm} — skipped"); continue; }
+            var libKey = ModKey.FromNameAndExtension(map.Plugin);
+            int pooled = 0;
+            foreach (var row in map.Faces)
+            {
+                if (include is not null && !include.Contains(row.Key)) continue;
+                uint id; try { id = Convert.ToUInt32(row.Library, 16); } catch { continue; }
+                bool fem = row.Sex.Equals("F", StringComparison.OrdinalIgnoreCase);
+                var n = new Npc(new FormKey(libKey, id), GameCfg.Release) { EditorID = row.EditorId, Name = row.Name, Weight = row.Weight };
+                n.Configuration.Flags = (fem ? NpcConfiguration.Flag.Female : 0) | NpcConfiguration.Flag.Unique;
+                if (FormKey.TryFactory(row.Race, out var rk)) n.Race.SetTo(rk);
+                if (row.Skin.Length > 0 && FormKey.TryFactory(row.Skin, out var sk)) n.WornArmor.SetTo(sk);
+                libOrigEid[n.FormKey] = row.Npc;
+                void PoolLib(string race, bool overlay)
+                {
+                    var key = PoolKey(race, fem);
+                    if (!pool.TryGetValue(key, out var l)) { l = new(); pool[key] = l; }
+                    l.Add(new Face(n, "", false, fem, overlay, row.Source, Library: true));
+                }
+                PoolLib(row.PoolRace, false);
+                if (raceOverride.TryGetValue(row.Key, out var ovs))
+                    foreach (var (ov, adopt) in ovs)
+                    {
+                        if (ov.Equals(row.PoolRace, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (adopt) PoolLib(ov, false);
+                        else if (RaceCompat.AreCompatible(row.PoolRace, ov)) PoolLib(ov, true);
+                    }
+                pooled++;
+            }
+            libraryPlugins.Add(map.Plugin);
+            srcModes.Add((map.Plugin, "library", $"library build ({pooled} faces pooled) — self-contained, no source mods needed"));
+            Console.WriteLine($"Library build {map.Plugin}: {pooled} faces pooled.");
+        }
         // (RemapLinks deferred: we copy only the WORN source HDPTs after assignment, then remap.)
 
         var cursor = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -322,6 +370,7 @@ static class Generate
         int donorSeq = 0;
         Npc Donor(Face face)
         {
+            if (face.Library) return (Npc)face.Npc;   // already a donor in the library plugin — reference it as-is
             var dkey = face.Source + "#" + face.Npc.FormKey;
             if (donorByFace.TryGetValue(dkey, out var d)) return d;
             var s = face.Npc;
@@ -361,7 +410,7 @@ static class Generate
                 // from the DONOR NPC this plugin carries for the picked face (see Donor above) + race/skin/weight so
                 // head, body and race agree, + setFlags=female / voiceType when feminizing.
                 var dn = Donor(face);
-                var baseOps = new List<string> { $"copyVisualStyle={outName}|{dn.FormKey.ID:X}" };
+                var baseOps = new List<string> { $"copyVisualStyle={dn.FormKey.ModKey.FileName}|{dn.FormKey.ID:X}" };   // this plugin, or the library build's
                 // Race must match the donor or the game can crash (SkyPatcher doc: "gender and race also match —
                 // those can also be modified with SkyPatcher"). A NATIVE draw adopts the donor's race exactly as
                 // ESP mode does (custom khajiit breeds etc.) via `race=`; an OVERLAY draw keeps the target's race by
@@ -399,7 +448,9 @@ static class Generate
                     // (via race= above) — a custom race resolves to hex -> the default feminine height.
                     femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = face.Overlay ? race : RaceOf(face.Npc.Race.FormKey);
                 }
-                var note = $"; {t.EditorID} \"{t.Name?.String}\" <= donor {dn.EditorID} = {face.Npc.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}"
+                var note = (face.Library
+                         ? $"; {t.EditorID} \"{t.Name?.String}\" <= library donor {dn.EditorID} ({libOrigEid.GetValueOrDefault(dn.FormKey, "")} \"{face.Npc.Name?.String}\" from {face.Source}, build {dn.FormKey.ModKey.FileName})"
+                         : $"; {t.EditorID} \"{t.Name?.String}\" <= donor {dn.EditorID} = {face.Npc.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}")
                          + (face.Overlay ? " [overlay: keeps target race]" : "");
                 runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps, note));
                 continue;
@@ -574,9 +625,16 @@ static class Generate
 
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
-        outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
-        Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
-                          (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
+        // A runtime config fed ONLY by library builds has nothing to write: every donor already lives in
+        // FDA_Library_*.esp, so the output is the SkyPatcher ini alone (no load-order slot at all).
+        bool writePlugin = !skypatcher || outMod.EnumerateMajorRecords().Any();
+        if (writePlugin)
+        {
+            outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
+            Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
+                              (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
+        }
+        else Console.WriteLine($"No plugin written — every face comes from a library build ({string.Join(", ", libraryPlugins)}); the output is the SkyPatcher config only.");
         if (skypatcher)
             Console.WriteLine($"SkyPatcher runtime mode: the plugin holds {donorByFace.Count} DONOR faces (never placed); {runtimeTargets.Count} targets get their face at load via copyVisualStyle from them (no overrides); {raceSwitched} adopt the donor's race via race=; {skinOps} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
 
@@ -729,8 +787,10 @@ static class Generate
         // Dispose the overlay immediately (it memory-maps the file): a long-running server would otherwise
         // keep the output ESP locked, blocking a regenerate to the same folder.
         List<string> masters = new();
-        using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
-            masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
+        if (writePlugin)
+            using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
+                masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
+        masters.AddRange(libraryPlugins.Where(p => !masters.Contains(p, StringComparer.OrdinalIgnoreCase)));   // the config needs the build enabled
         // Classify sources for the manifest. After the deep-copy above, a disable/standalone source is no
         // longer a master (its records are copied in), so it can genuinely be turned off. Reconcile against
         // the ACTUAL master list: anything still mastered (a referenced record we couldn't copy out) must
@@ -758,7 +818,9 @@ static class Generate
                     + "  replacer's face you get. REQUIRES SkyPatcher enabled AND this plugin enabled. Sources follow the lists\n"
                     + "  below exactly as in ESP mode: a keep source stays a master; a disable/standalone source's head parts are\n"
                     + "  copied in, so the plugin travels to another MO2 instance on its own.\n"
-                    + $"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
+                    + (libraryPlugins.Count > 0 ? $"  Faces from LIBRARY BUILD(S) {string.Join(", ", libraryPlugins)} are referenced there directly — keep those builds installed and enabled.\n" : "")
+                    + (writePlugin ? $"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n"
+                                   : "No plugin in this output: every face comes from the library build(s) above, so this is the SkyPatcher config alone.\n"));
         else
         {
             rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
@@ -803,7 +865,7 @@ static class Generate
         if (missingFaceGen.Count > 0)
             rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
         File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
-        Console.WriteLine(skypatcher ? $"Wrote {esp} (donor faces) + SkyPatcher runtime config" : $"Wrote {esp}");
+        Console.WriteLine(skypatcher ? (writePlugin ? $"Wrote {esp} (donor faces) + SkyPatcher runtime config" : $"Wrote SkyPatcher runtime config under {outFolder} (faces from the library build)") : $"Wrote {esp}");
         return 0;
     }
 
@@ -829,7 +891,7 @@ static class Generate
     // Returns the source FaceGen NIF bytes (or null if absent) so the caller can extract its textures.
     // tgtSub = the plugin folder the TARGET record belongs to: "Skyrim.esm" for an override, or the output
     // plugin name for a NEW (boost) NPC — the game looks for FaceGen under the plugin that defines the NPC.
-    static byte[]? CopyFaceGen(SourceAssets src, string srcSub, uint srcId, uint tgtId, string outFolder, string tgtSub = "Skyrim.esm")
+    internal static byte[]? CopyFaceGen(SourceAssets src, string srcSub, uint srcId, uint tgtId, string outFolder, string tgtSub = "Skyrim.esm")
     {
         string sName = "00" + srcId.ToString("x6"), tName = "00" + tgtId.ToString("x6");
         var nif = src.Get(Path.Combine("meshes", "actors", "character", "facegendata", "facegeom", srcSub, sName + ".nif"));
@@ -844,7 +906,7 @@ static class Generate
     // paths resolve; skip facegendata (facetint/geom are re-keyed separately). Vanilla textures won't
     // resolve in the source (and, when baking, are left to load from stock).
     static readonly Regex DdsRx = new(@"(?:data[\\/])?textures[\\/][\w \-\\/().]+?\.dds", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    static IEnumerable<string> DdsPathsInNif(byte[] nif)
+    internal static IEnumerable<string> DdsPathsInNif(byte[] nif)
     {
         foreach (Match m in DdsRx.Matches(System.Text.Encoding.Latin1.GetString(nif)))
         {
@@ -856,7 +918,7 @@ static class Generate
         }
     }
 
-    static void WriteBytes(string outFolder, string rel, byte[] data)
+    internal static void WriteBytes(string outFolder, string rel, byte[] data)
     {
         var d = Path.Combine(outFolder, rel);
         Directory.CreateDirectory(Path.GetDirectoryName(d)!);

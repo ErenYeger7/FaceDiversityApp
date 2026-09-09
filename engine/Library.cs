@@ -222,7 +222,7 @@ static class Library
     // ---- helpers ----
 
     // Double-quote a YAML scalar (FormKeys contain ':'). Escape backslash + quote per YAML double-quoted rules.
-    static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+    internal static string Quote(string s) => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
     // Trailing "# EditorID (Race)" so the file is human-scannable; never parsed back.
     static string? Comment(string? editorId, string? race)
