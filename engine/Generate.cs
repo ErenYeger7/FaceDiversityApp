@@ -22,7 +22,7 @@ static class Generate
 {
     // Overlay = this pooling is a compat-group "also serve" (double-dip): the target keeps ITS race and
     // just wears this head-compatible face, so assignment must NOT SetTo the face's race.
-    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female, bool Overlay = false);
+    record Face(INpcGetter Npc, string Folder, bool Disable, bool Female, bool Overlay = false, string Source = "");
     record VoiceRemap(Dictionary<string, List<string>> Direct, Dictionary<string, List<string>> Fallback);
     static string PoolKey(string race, bool female) => race + (female ? "|F" : "|M");
 
@@ -32,7 +32,7 @@ static class Generate
         string? includePath = null, configPath = null, loadOrderPath = null, feminineNamesPath = null, assetDirsPath = null, raceOverridePath = null, feminineHeightsPath = null;
         var srcSpecs = new List<(string path, string? forced)>(); bool feminize = true; bool boost = false;
         bool sexplague = false; string? sexplaguePct = null; bool feminineNames = false; bool bakeTextures = false; bool feminineHeights = false;
-        bool skypatcher = false;   // SkyPatcher runtime mode: copyVisualStyle lines, NO plugin/FaceGen written
+        bool skypatcher = false;   // SkyPatcher runtime mode: donor NPCs in the plugin + copyVisualStyle lines; targets are not overridden
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
@@ -54,7 +54,7 @@ static class Generate
                 case "--sexplague-pct": sexplaguePct = args[++i]; break; // "60,30,10" tier split (overrides yaml)
                 case "--feminine-names": feminineNames = true; feminineNamesPath = args[++i]; break; // apply feminine fullName via SkyPatcher
                 case "--feminine-heights": feminineHeights = true; feminineHeightsPath = args[++i]; break; // race-based height= op per feminized male via SkyPatcher (feminine_heights.yaml)
-                case "--skypatcher": skypatcher = true; break;    // runtime mode: one copyVisualStyle line per target; no plugin, no FaceGen, sources stay enabled
+                case "--skypatcher": skypatcher = true; break;    // runtime mode: donor NPC per face in the plugin + one copyVisualStyle line per target (no overrides)
                 case "--bake-textures": bakeTextures = true; break;   // bake cross-mod face textures (brows/eyes/etc.) for self-contained output
                 case "--asset-dirs": assetDirsPath = args[++i]; break; // file of enabled mod folders (priority) to resolve textures from
                 case "--race-override": raceOverridePath = args[++i]; break; // TSV faceId<TAB>race — pool a face as another race (library merger)
@@ -156,9 +156,10 @@ static class Generate
             var cls = Classify.Inspect(sp);
             var mode = forced ?? cls.Mode;
             srcModes.Add((cls.Plugin, mode, forced != null ? "forced" : cls.Why));
-            // Runtime mode never deep-copies or bakes: every source stays enabled and is referenced at load.
-            bool disable = !skypatcher && (mode == "disable" || mode == "standalone"); // esp off -> deep-copy records
-            bool unpack = !skypatcher && mode == "standalone";                          // also bake assets in (fully removable)
+            // Same per-source semantics in BOTH output modes: runtime mode's donor NPCs live in this plugin and
+            // deep-copy/bake exactly like overrides do, so a disable/standalone source is detachable there too.
+            bool disable = mode == "disable" || mode == "standalone"; // esp off -> deep-copy records
+            bool unpack = mode == "standalone";                       // also bake assets in (fully removable)
 
             var sm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(sp), GameCfg.Release);
             var folder = Path.GetDirectoryName(Path.GetFullPath(sp))!;
@@ -190,7 +191,7 @@ static class Generate
                 void Pool(string race, bool overlay) {
                     var key = PoolKey(race, Fem(n));
                     if (!pool.TryGetValue(key, out var l)) { l = new(); pool[key] = l; }
-                    l.Add(new Face(n, folder, disable, Fem(n), overlay));
+                    l.Add(new Face(n, folder, disable, Fem(n), overlay, Path.GetFileName(sp)));
                 }
                 Pool(r, false);   // native bucket (own race) — assignment adopts the face's race as before
                 // Merger: ALSO pool under each saved extra race.
@@ -217,7 +218,10 @@ static class Generate
         int weightMatched = 0;                                   // runtime-mode `weight=` ops (target weight set to the donor's so head and body meet)
         var feminizedNpcs = new List<(string plugin, uint id, string name)>(); // males we flipped female (SexPlague + feminine names)
         var femRace = new Dictionary<(string plugin, uint id), string>();      // FINAL in-game race of a feminized male (for race-based heights)
-        var runtimeTargets = new List<((string plugin, uint id) key, List<string> ops)>();   // SkyPatcher runtime mode: per-target base ops, in assignment order
+        // SkyPatcher runtime mode: per-target base ops, in assignment order, plus a human-readable note
+        // ("; Target <= Donor (source)") written as a comment line above the ini line — a bare FormID
+        // like copyVisualStyle=Skyrim.esm|13388 is otherwise impossible to attribute when a face looks off.
+        var runtimeTargets = new List<((string plugin, uint id) key, List<string> ops, string note)>();
         var missingFaceGen = new List<string>();
         var extracted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -306,6 +310,37 @@ static class Generate
         }
         static string ShortRace(string r) => r.Replace("Race", "").Replace("Vampire", "V");
 
+        // ---- Runtime-mode DONORS. `copyVisualStyle` takes a FormID, and every replacer of Bryling shares
+        // Skyrim.esm|13265 — so referencing the origin record copies whichever replacer WINS the load order, not
+        // the one picked (that is how Siddgeir ended up with an unknown Betrid). Instead each distinct face used
+        // becomes a NEW, never-placed NPC in THIS plugin carrying exactly the selected source's face fields, with
+        // that source's FaceGen re-keyed under this plugin; disable/standalone sources deep-copy their head parts
+        // like ESP mode, so the plugin is a self-contained face library that travels between MO2 instances and
+        // makes the load order irrelevant. Minimal record on purpose: only face/race/skin/class/voice are linked,
+        // so a mod-added source's factions/outfits/packages never pin it as a master.
+        var donorByFace = new Dictionary<string, Npc>(StringComparer.OrdinalIgnoreCase);
+        int donorSeq = 0;
+        Npc Donor(Face face)
+        {
+            var dkey = face.Source + "#" + face.Npc.FormKey;
+            if (donorByFace.TryGetValue(dkey, out var d)) return d;
+            var s = face.Npc;
+            var fk = outMod.GetNextFormKey();
+            d = new Npc(fk, GameCfg.Release) { EditorID = $"FDAdonor{donorSeq++:D4}_{s.EditorID}", Name = s.Name?.String };
+            d.Race.SetTo(s.Race.FormKey);
+            d.Configuration.Flags = (Fem(s) ? NpcConfiguration.Flag.Female : 0) | NpcConfiguration.Flag.Unique;
+            if (!s.Class.IsNull && !disabledKeys.Contains(s.Class.FormKey.ModKey)) d.Class.SetTo(s.Class.FormKey);
+            if (!s.Voice.IsNull && !disabledKeys.Contains(s.Voice.FormKey.ModKey)) d.Voice.SetTo(s.Voice.FormKey);
+            ApplyFaceFields(d, face, keepRace: true);   // race set above; keepRace so it isn't counted as an adoption
+            outMod.Npcs.Add(d);
+            var fg = CopyFaceGen(assets[face.Folder], s.FormKey.ModKey.FileName, s.FormKey.ID, fk.ID, outFolder, outName);
+            if (fg == null) missingFaceGen.Add($"DONOR {d.EditorID} <= {s.EditorID} ({s.FormKey.ModKey.FileName})");
+            else if (face.Disable || bakeTextures) foreach (var tex in DdsPathsInNif(fg)) ExtractAsset(assets[face.Folder], tex);
+            donorByFace[dkey] = d;
+            return d;
+        }
+        int skinOps = 0;   // runtime lines carrying skin= (skinCarried counts donors, once each)
+
         foreach (var t in targets)
         {
             var race = RaceOf(t.Race.FormKey);
@@ -322,37 +357,36 @@ static class Generate
 
             if (skypatcher)
             {
-                // SkyPatcher runtime: NO record override, NO FaceGen copy, NO texture baking. One ini line per target:
-                // copyVisualStyle from the donor (+ setFlags=female / voiceType when feminizing). The donor is the
-                // face's record: for an override-sourced face that's the origin NPC (e.g. Skyrim.esm|01326A), whose
-                // look at load time is whatever wins your load order — sources must stay ENABLED.
-                var d = face.Npc.FormKey;
-                var baseOps = new List<string> { $"copyVisualStyle={d.ModKey.FileName}|{d.ID:X}" };
+                // SkyPatcher runtime: the target's record is NOT overridden. One ini line per target: copyVisualStyle
+                // from the DONOR NPC this plugin carries for the picked face (see Donor above) + race/skin/weight so
+                // head, body and race agree, + setFlags=female / voiceType when feminizing.
+                var dn = Donor(face);
+                var baseOps = new List<string> { $"copyVisualStyle={outName}|{dn.FormKey.ID:X}" };
                 // Race must match the donor or the game can crash (SkyPatcher doc: "gender and race also match —
                 // those can also be modified with SkyPatcher"). A NATIVE draw adopts the donor's race exactly as
                 // ESP mode does (custom khajiit breeds etc.) via `race=`; an OVERLAY draw keeps the target's race by
                 // design (head-compat group, e.g. base<->vampire) and emits nothing. Same race -> nothing.
-                if (!face.Overlay && face.Npc.Race.FormKey != t.Race.FormKey)
+                if (!face.Overlay && dn.Race.FormKey != t.Race.FormKey)
                 {
-                    var rk = face.Npc.Race.FormKey;
+                    var rk = dn.Race.FormKey;
                     baseOps.Add($"race={rk.ModKey.FileName}|{rk.ID:X}");
                     raceSwitched++;
                 }
                 // Per-NPC skin (WNAM): copyVisualStyle copies face+hair only, so the author's body for this face
                 // (CS_Foundation -> CS_Visions body) needs its own `skin=` op — the line the user's hand-made
-                // configs carried. Same every-draw rule as ESP mode (see ApplyFaceFields).
-                if (!face.Npc.WornArmor.IsNull && face.Npc.WornArmor.FormKey != t.WornArmor.FormKey)
+                // configs carried. The donor carries it unless it lived in a disabled source (see ApplyFaceFields).
+                if (!dn.WornArmor.IsNull && dn.WornArmor.FormKey != t.WornArmor.FormKey)
                 {
-                    var wk = face.Npc.WornArmor.FormKey;
+                    var wk = dn.WornArmor.FormKey;
                     baseOps.Add($"skin={wk.ModKey.FileName}|{wk.ID:X}");
-                    skinCarried++;
+                    skinOps++;
                 }
                 // WEIGHT: the face renders from the donor's FaceGen, baked at the DONOR's weight, while the body is
                 // built at the TARGET's weight — any gap between the two is a neck seam. ESP mode copies Weight in
                 // ApplyFaceFields; runtime mode must say so explicitly (89% of bandit lines differed, median 35).
-                if (Math.Abs(face.Npc.Weight - t.Weight) > 0.01f)
+                if (Math.Abs(dn.Weight - t.Weight) > 0.01f)
                 {
-                    baseOps.Add("weight=" + face.Npc.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+                    baseOps.Add("weight=" + dn.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
                     weightMatched++;
                 }
                 if (feminize && !Fem(t))
@@ -365,7 +399,9 @@ static class Generate
                     // (via race= above) — a custom race resolves to hex -> the default feminine height.
                     femRace[(t.FormKey.ModKey.FileName, t.FormKey.ID)] = face.Overlay ? race : RaceOf(face.Npc.Race.FormKey);
                 }
-                runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps));
+                var note = $"; {t.EditorID} \"{t.Name?.String}\" <= donor {dn.EditorID} = {face.Npc.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}"
+                         + (face.Overlay ? " [overlay: keeps target race]" : "");
+                runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps, note));
                 continue;
             }
 
@@ -538,23 +574,22 @@ static class Generate
 
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
+        outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
+        Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
+                          (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
         if (skypatcher)
-            Console.WriteLine($"SkyPatcher runtime mode: NO plugin written — {runtimeTargets.Count} targets get their face at load via copyVisualStyle (sources must stay enabled); {raceSwitched} adopt the donor's race via race=; {skinCarried} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
-        else
-        {
-            outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
-            Console.WriteLine($"Output is {(droppedEsl ? "a FULL ESP" : "ESL-flagged (ESPFE)")} — {newRecs} new records" +
-                              (droppedEsl ? $" exceed the 2048 ESPFE limit (uses a load-order slot)." : " (fits the ESPFE limit)."));
-        }
+            Console.WriteLine($"SkyPatcher runtime mode: the plugin holds {donorByFace.Count} DONOR faces (never placed); {runtimeTargets.Count} targets get their face at load via copyVisualStyle from them (no overrides); {raceSwitched} adopt the donor's race via race=; {skinOps} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
 
         int totalAssigned = report.Values.Sum(v => v.assigned), totalSkipped = report.Values.Sum(v => v.skipped);
         Console.WriteLine("Source classification:");
         foreach (var (plugin, mode, why) in srcModes) Console.WriteLine($"  [{mode.ToUpperInvariant(),7}] {plugin}  — {why}");
-        Console.WriteLine($"\nGenerated {outName}: {totalAssigned} overrides ({femCount} feminized), {outMod.HeadParts.Count} HDPT copied.");
+        Console.WriteLine(skypatcher
+            ? $"\nGenerated {outName}: {totalAssigned} targets via {donorByFace.Count} donor NPCs ({femCount} feminized), {outMod.HeadParts.Count} HDPT copied."
+            : $"\nGenerated {outName}: {totalAssigned} overrides ({femCount} feminized), {outMod.HeadParts.Count} HDPT copied.");
         if (!skypatcher && raceSwitched > 0) Console.WriteLine($"Race: {raceSwitched} NPCs adopt their face's race (custom breed/follower race — that source stays a master).");
         if (skinCarried + skinDropped > 0)
             Console.WriteLine($"Per-NPC skin (WNAM): {skinCarried} NPCs carry their face's author-set body skin"
-                              + (skinDropped > 0 ? $"; {skinDropped} DROPPED — the skin record lives in a disabled source (use keep or runtime mode to carry it)." : "."));
+                              + (skinDropped > 0 ? $"; {skinDropped} DROPPED — the skin record lives in a disabled source (use keep mode for that source to carry it)." : "."));
         Console.WriteLine($"{"Race",-14}{"assigned",10}{"skipped",9}{"faces",7}");
         foreach (var kv in report.OrderBy(k => k.Key))
             Console.WriteLine($"{kv.Key,-14}{kv.Value.assigned,10}{kv.Value.skipped,9}{kv.Value.faces,7}");
@@ -654,10 +689,11 @@ static class Generate
                 // feminized-only ops when it was feminized. One line per NPC, all ops colon-joined.
                 var femName = new Dictionary<(string plugin, uint id), string>();
                 foreach (var f in feminizedNpcs) femName.TryAdd((f.plugin, f.id), f.name);
-                foreach (var (key, baseOps) in runtimeTargets)
+                foreach (var (key, baseOps, note) in runtimeTargets)
                 {
                     var ops = new List<string>(baseOps);
                     if (femName.TryGetValue(key, out var nm)) ops.AddRange(FemOps(key.plugin, key.id, nm));
+                    npcLines.Add(note);   // `;` comment lines are what the SkyPatcher NPC Replacer Converter itself emits
                     npcLines.Add($"filterByNpcs={key.plugin}|{key.id:X}:" + string.Join(":", ops));
                 }
             }
@@ -693,9 +729,8 @@ static class Generate
         // Dispose the overlay immediately (it memory-maps the file): a long-running server would otherwise
         // keep the output ESP locked, blocking a regenerate to the same folder.
         List<string> masters = new();
-        if (!skypatcher)   // runtime mode writes no plugin, so there is nothing to re-read
-            using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
-                masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
+        using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
+            masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
         // Classify sources for the manifest. After the deep-copy above, a disable/standalone source is no
         // longer a master (its records are copied in), so it can genuinely be turned off. Reconcile against
         // the ACTUAL master list: anything still mastered (a referenced record we couldn't copy out) must
@@ -713,19 +748,23 @@ static class Generate
         rd.Append($"{outName} — generated by FaceDiversityApp (personal use only; do not redistribute)\n\n");
         rd.Append($"Category: {category}.  {totalAssigned} faces ({femCount} feminized males), {totalSkipped} skipped.\n");
         if (skypatcher)
-            rd.Append($"Output type: SKYPATCHER RUNTIME — no plugin written. {runtimeTargets.Count} targets get their face at load via\n"
-                    + $"  copyVisualStyle (+ race= when the donor's race differs — {raceSwitched} here; + skin= when the donor has an\n"
-                    + $"  author-set body skin — {skinCarried} here; + weight= so the body is built at the weight the donor's FaceGen was\n"
-                    + $"  baked at — {weightMatched} here, a neck seam otherwise; + setFlags=female / voiceType when feminized). REQUIRES SkyPatcher enabled, and EVERY source\n"
-                    + "  mod must stay ENABLED (their NPC records + FaceGen are used directly). No NPC record overrides are written,\n"
-                    + "  so this coexists with other mods that edit the same NPCs. An override-sourced face copies that NPC's look\n"
-                    + "  as it wins YOUR load order.\n");
+            rd.Append($"Output type: SKYPATCHER RUNTIME (self-contained face library). This plugin holds {donorByFace.Count} DONOR NPCs, never\n"
+                    + "  placed in the world: each one IS the picked face — the selected source's head parts, tints, morphs, weight and\n"
+                    + "  skin — with that source's FaceGen re-keyed under this plugin. No NPC record is overridden: the\n"
+                    + $"  {runtimeTargets.Count} targets get their look at load via copyVisualStyle={outName}|<donor> (+ race= when the donor's\n"
+                    + $"  race differs — {raceSwitched} here; + skin= when the face's author set a body — {skinOps} here; + weight= so the\n"
+                    + $"  body is built at the weight the FaceGen was baked at — {weightMatched} here; + setFlags=female / voiceType when\n"
+                    + "  feminized). Coexists with other mods that edit the same NPCs, and the load order no longer decides which\n"
+                    + "  replacer's face you get. REQUIRES SkyPatcher enabled AND this plugin enabled. Sources follow the lists\n"
+                    + "  below exactly as in ESP mode: a keep source stays a master; a disable/standalone source's head parts are\n"
+                    + "  copied in, so the plugin travels to another MO2 instance on its own.\n"
+                    + $"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
         else
         {
             rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
             if (raceSwitched > 0) rd.Append($"Race: {raceSwitched} NPCs adopt their face's race (a custom breed or follower race) — that race's mod is a master above.\n");
             if (skinCarried > 0) rd.Append($"Skin: {skinCarried} NPCs carry the body skin their face's author set (per-NPC WNAM) — its mod is a master above.\n");
-            if (skinDropped > 0) rd.Append($"Skin: {skinDropped} NPCs LOST their face's author-set body skin (the skin record lives in a disabled source; use keep or runtime mode to carry it).\n");
+            if (skinDropped > 0) rd.Append($"Skin: {skinDropped} NPCs LOST their face's author-set body skin (the skin record lives in a disabled source; use keep mode for that source to carry it).\n");
         }
         if (bakeTextures)
             rd.Append($"Textures: BAKED — {bakedCrossMod} cross-mod face textures (brows/eyes/hair from other packs)\n"
@@ -764,7 +803,7 @@ static class Generate
         if (missingFaceGen.Count > 0)
             rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
         File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
-        Console.WriteLine(skypatcher ? $"Wrote SkyPatcher runtime config under {outFolder} (no plugin)" : $"Wrote {esp}");
+        Console.WriteLine(skypatcher ? $"Wrote {esp} (donor faces) + SkyPatcher runtime config" : $"Wrote {esp}");
         return 0;
     }
 

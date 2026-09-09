@@ -312,7 +312,7 @@ window.addEventListener('unhandledrejection',function(ev){
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
         <input type="checkbox" id="skypatcherMode">
-        <span>Build as SkyPatcher file <span class="muted">(origin mods will be active in the load order) — no NPC record overrides or FaceGen copies; faces are applied at load via copyVisualStyle, so it coexists with other mods editing the same NPCs</span></span>
+        <span>Build as SkyPatcher file <span class="muted">(self-contained face library) — targets are NOT overridden; each picked face becomes a donor NPC inside the plugin (its FaceGen included, head parts copied for disable/standalone sources) and is applied at load via copyVisualStyle, so it coexists with other mods editing the same NPCs, ignores load-order winners, and travels between MO2 instances</span></span>
       </label>
 
       <label class="row" style="margin-top:10px;gap:8px;cursor:pointer">
@@ -660,7 +660,7 @@ function renderSources(){
     <div class="src">
       <span class="badge b-${s.mode}">${s.mode.toUpperCase()}</span>
       <span class="name" title="${esc(s.path)}\n${esc(s.why||'')}">${esc(s.plugin)} <span class="muted">· ${s.femaleNpcs} F</span></span>
-      <select title="${esc(isRuntime() ? 'SkyPatcher runtime: every source stays enabled and is referenced at load — keep/disable/standalone do not apply' : MODE_HELP)}" ${isRuntime()?'disabled':''} onchange="setMode('${jsq(s.path)}',this.value)">
+      <select title="${esc(MODE_HELP)}" onchange="setMode('${jsq(s.path)}',this.value)">
         ${['keep','disable','standalone'].map(m=>`<option value="${m}" ${m===s.mode?'selected':''}>${MODE_LABEL[m]}</option>`).join('')}
       </select>
       <button class="mini" onclick="removeSource('${jsq(s.path)}')">✕</button>
@@ -964,10 +964,14 @@ function renderCoverage(){
           :` — exceeds 2048, so it ships as a full ESP (one load-order slot). To keep it ESPFE, use fewer disable/standalone sources or switch some to <b>keep</b> mode.`)
     + `</div>` : '';
   if(isRuntime()){
+    // Runtime: one DONOR NPC per selected usable face (+ the worn head parts of disable/standalone sources, as
+    // above) — those are the new records; targets are not overridden. Same ESL rule as the engine.
+    const donors = state.faces.filter(f=>state.selected.has(f.id) && faceUsable(f)).length;
+    const rtRecs = donors + hdptNew, rtEsl = rtRecs <= 2048;
     $('#eslProj').innerHTML = state.sources.length
-      ? `<div class="warnbox" style="background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff">SkyPatcher runtime: <b>no plugin records</b> — faces are applied at load via <code>copyVisualStyle</code>, so nothing counts against the ESL limit and no other NPC mod is overridden. All <b>${state.sources.length}</b> source mod(s) must stay <b>enabled</b>.</div>`
+      ? `<div class="warnbox" style="${rtEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">SkyPatcher runtime: <b>${donors}</b> donor NPC${donors===1?'':'s'} (one per picked face, FaceGen included) + <b>${hdptNew}</b> worn head parts = <b>${rtRecs}</b> new records → <b>${rtEsl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>. Targets are <b>not overridden</b>; they get their look at load via <code>copyVisualStyle</code> from the donors. Keep sources stay masters; disable/standalone sources are copied in.</div>`
       : '';
-    $('#boost').checked=false; $('#boost').disabled=true; $('#boostNote').textContent='(N/A in SkyPatcher runtime mode — needs records in an esp)';
+    $('#boost').checked=false; $('#boost').disabled=true; $('#boostNote').textContent='(N/A in SkyPatcher runtime mode)';
   }
 
   let msg = '';
@@ -991,13 +995,12 @@ function renderCoverage(){
 // ---------- create ----------
 $('#feminize').onchange = ()=>{ if(state.faces.length) renderFaces(); renderCoverage(); refreshName(); }; // usability depends on feminize
 $('#boost').onchange = ()=>{ renderCoverage(); refreshName(); };
-// SkyPatcher runtime mode: no plugin, no FaceGen, no baking — sources stay enabled. Checking it turns Bake
-// textures off (and disables it); Boost is N/A (handled in renderCoverage); per-source modes are moot.
+// SkyPatcher runtime mode: donor NPCs in the plugin + copyVisualStyle lines, targets untouched. Per-source
+// modes and Bake textures apply exactly as in ESP mode (the donors are records in our plugin); Boost is N/A
+// (handled in renderCoverage).
 function isRuntime(){ const c=$('#skypatcherMode'); return !!c && c.checked; }
 function applySkyMode(){
   const rt=isRuntime();
-  if(rt) $('#bakeTextures').checked=false;
-  $('#bakeTextures').disabled = rt;
   if(!rt){   // leaving runtime: restore Boost to what the category allows (renderCoverage only disables it while runtime is on)
     const c = state.config && state.config.categories.find(x=>x.key===$('#category').value);
     const scan = !!(c && c.scan), b = !!(state.boostInfo && state.boostInfo.boostable);
