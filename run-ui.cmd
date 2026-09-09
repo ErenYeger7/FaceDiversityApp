@@ -6,8 +6,9 @@ cd /d "%~dp0engine"
 
 REM Stop a server still running from an earlier launch on this port: it would keep the OLD engine alive
 REM (and lock the build output) while serving the NEW page from disk -> "undefined" values, dead buttons.
+REM (no parentheses inside this block: cmd would read one as the block's end)
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"') do (
-  echo Stopping the previous FaceDiversityApp server (PID %%p)...
+  echo Stopping the previous FaceDiversityApp server, PID %%p ...
   taskkill /PID %%p /F >nul 2>&1
 )
 
