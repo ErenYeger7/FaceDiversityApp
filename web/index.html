@@ -703,9 +703,11 @@ function hasLibrarySource(){ return state.sources.some(s=>s.mode==='library'); }
 function syncLibraryLock(){
   const c=$('#skypatcherMode'); if(!c) return;
   const lock = hasLibrarySource();
-  if(lock && !c.checked){ c.checked=true; applySkyMode(); }
+  // a library build carries no face records to bake, so runtime stays on; Boost is still a choice (off by
+  // default) — its clones live in an ESPFE and take their faces from the library at load
+  if(lock && !c.checked){ c.checked=true; $('#boost').checked=false; applySkyMode(); }
   c.disabled = lock;
-  $('#skyLockNote').textContent = lock ? '(forced on: a library build is a source)' : '';
+  $('#skyLockNote').textContent = lock ? '(forced on: a library build is a source — Boost still available)' : '';
 }
 
 function setMode(path, mode){ const s=state.sources.find(x=>x.path===path); if(s){ s.mode=mode; renderSources(); renderCoverage(); } }
@@ -1036,12 +1038,17 @@ function renderCoverage(){
     const picked = state.faces.filter(f=>state.selected.has(f.id) && faceUsable(f));
     const fromLib = picked.filter(f=>f.library).length, donors = picked.length - fromLib;
     const rtRecs = donors + hdptNew, rtEsl = rtRecs <= 2048;
+    const boostClones = ($('#boost').checked && !$('#boost').disabled) ? Math.max(0, extra) : 0;
     $('#eslProj').innerHTML = state.sources.length
       ? (rtRecs === 0 && fromLib > 0
-        ? `<div class="warnbox" style="background:rgba(75,191,115,.1);border-color:rgba(75,191,115,.35);color:#b6e6c6">SkyPatcher runtime from the <b>library build</b>: <b>${fromLib}</b> faces referenced directly — <b>no plugin</b> is written, the output is the SkyPatcher config alone (keep the build installed and enabled).</div>`
+        ? `<div class="warnbox" style="background:rgba(75,191,115,.1);border-color:rgba(75,191,115,.35);color:#b6e6c6">SkyPatcher runtime from the <b>library build</b>: <b>${fromLib}</b> faces referenced directly — ${boostClones ? `Boost adds <b>${boostClones}</b> clone NPCs in an ESPFE (faces via copyVisualStyle)` : '<b>no plugin</b> is written, the output is the SkyPatcher config alone'} (keep the build installed and enabled).</div>`
         : `<div class="warnbox" style="${rtEsl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">SkyPatcher runtime: <b>${donors}</b> donor NPC${donors===1?'':'s'} (one per picked face, FaceGen included) + <b>${hdptNew}</b> worn head parts = <b>${rtRecs}</b> new records → <b>${rtEsl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>${fromLib?` · plus <b>${fromLib}</b> faces referenced from the library build`:''}. Targets are <b>not overridden</b>; they get their look at load via <code>copyVisualStyle</code> from the donors. Keep sources stay masters; disable/standalone sources are copied in.</div>`)
       : '';
-    $('#boost').checked=false; $('#boost').disabled=true; $('#boostNote').textContent='(N/A in SkyPatcher runtime mode)';
+    // Boost stays available in runtime mode: the extra faces become clone NPCs in an ESPFE, injected into the
+    // leveled lists as usual, each getting its face at load via copyVisualStyle (no FaceGen in this plugin).
+    const b = !!(state.boostInfo && state.boostInfo.boostable);
+    $('#boost').disabled = !b;
+    $('#boostNote').textContent = b ? `(${state.boostInfo.lists} leveled lists · runtime: clones get their face via copyVisualStyle)` : $('#boostNote').textContent;
   }
 
   let msg = '';

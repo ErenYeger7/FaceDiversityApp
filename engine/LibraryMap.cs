@@ -22,6 +22,7 @@ class LibraryMap
         public string EditorId { get; set; } = "";     // donor EditorID in the library plugin
         public string PoolRace { get; set; } = "";     // join key (esm race name, or hex) — identical to FaceInfo.PoolRace
         public string Race { get; set; } = "";         // FormKey the donor's race resolves to (copied into the library, or vanilla)
+        public string RaceOrigin { get; set; } = "";   // the SOURCE race FormKey when Race is a library copy ("" when vanilla) — a target of that race is the same race
         public string Skin { get; set; } = "";         // FormKey of the donor's per-NPC skin (copied), or ""
         public float Weight { get; set; }
         public string Sex { get; set; } = "F";
@@ -89,17 +90,18 @@ class LibraryMap
               .Append(", editorId: ").Append(Library.Quote(r.EditorId))
               .Append(", poolRace: ").Append(Library.Quote(r.PoolRace))
               .Append(", race: ").Append(Library.Quote(r.Race))
+              .Append(string.IsNullOrWhiteSpace(r.RaceOrigin) ? "" : ", raceOrigin: " + Library.Quote(r.RaceOrigin))
               .Append(", skin: ").Append(Library.Quote(r.Skin))
               .Append(", weight: ").Append(r.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture))
               .Append(", sex: ").Append(Library.Quote(r.Sex)).Append(" }\n");
         File.WriteAllText(yamlPath, sb.ToString());
 
         var csv = new System.Text.StringBuilder();
-        csv.Append("key,source,sourceMod,npc,name,origin,plugin,library,editorId,poolRace,race,skin,weight,sex\n");
+        csv.Append("key,source,sourceMod,npc,name,origin,plugin,library,editorId,poolRace,race,raceOrigin,skin,weight,sex\n");
         static string C(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
         foreach (var r in m.Faces)
             csv.Append(string.Join(",", new[] { C(r.Key), C(r.Source), C(r.SourceMod), C(r.Npc), C(r.Name), C(r.Origin), C(m.PluginOf(r)), C(r.Library), C(r.EditorId),
-                                                C(r.PoolRace), C(r.Race), C(r.Skin), r.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), C(r.Sex) })).Append('\n');
+                                                C(r.PoolRace), C(r.Race), C(r.RaceOrigin), C(r.Skin), r.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture), C(r.Sex) })).Append('\n');
         File.WriteAllText(Path.ChangeExtension(yamlPath, ".csv"), csv.ToString());
     }
 

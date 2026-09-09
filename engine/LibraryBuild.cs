@@ -433,7 +433,8 @@ static class LibraryBuild
                 Npc = s.EditorID ?? "", Name = s.Name?.String ?? "", Origin = s.FormKey.ToString(),
                 Library = d.FormKey.ID.ToString("X6"), EditorId = d.EditorID ?? "",
                 PoolRace = Base.Contains(s.FormKey.ModKey.FileName) && esmNpcRace.TryGetValue(s.FormKey, out var vr) ? RaceOf(vr) : RaceOf(s.Race.FormKey),
-                Race = d.Race.FormKey.ToString(), Skin = d.WornArmor.IsNull ? "" : d.WornArmor.FormKey.ToString(),
+                Race = d.Race.FormKey.ToString(), RaceOrigin = d.Race.FormKey == s.Race.FormKey ? "" : s.Race.FormKey.ToString(),
+                Skin = d.WornArmor.IsNull ? "" : d.WornArmor.FormKey.ToString(),
                 Weight = d.Weight, Sex = Fem(s) ? "F" : "M"
             });
         var stem = Path.GetFileNameWithoutExtension(outName);

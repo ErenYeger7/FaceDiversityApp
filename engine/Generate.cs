@@ -221,6 +221,12 @@ static class Generate
         // mod — without the source mod. Runtime lines then point straight at the library plugin.
         var libraryPlugins = new List<string>();
         var libOrigEid = new Dictionary<FormKey, string>();   // library donor -> original NPC EditorID (for the ini comment)
+        // A library COPIES a custom race (TeenNord -> 000816:FDA_Library_1.esp). A target that already IS the
+        // original race must not be switched to the copy (same race, different record — it would break the
+        // mod's own race conditions), so "same race" also means "the copy's origin".
+        var libRaceOrigin = new Dictionary<FormKey, FormKey>();
+        bool SameRace(FormKey donorRace, FormKey targetRace) =>
+            donorRace == targetRace || (libRaceOrigin.TryGetValue(donorRace, out var org) && org == targetRace);
         foreach (var lm in libraryMaps)
         {
             var map = LibraryMap.Load(lm);
@@ -234,7 +240,11 @@ static class Generate
                 bool fem = row.Sex.Equals("F", StringComparison.OrdinalIgnoreCase);
                 var n = new Npc(new FormKey(libKey, id), GameCfg.Release) { EditorID = row.EditorId, Name = row.Name, Weight = row.Weight };
                 n.Configuration.Flags = (fem ? NpcConfiguration.Flag.Female : 0) | NpcConfiguration.Flag.Unique;
-                if (FormKey.TryFactory(row.Race, out var rk)) n.Race.SetTo(rk);
+                if (FormKey.TryFactory(row.Race, out var rk))
+                {
+                    n.Race.SetTo(rk);
+                    if (row.RaceOrigin.Length > 0 && FormKey.TryFactory(row.RaceOrigin, out var ro) && ro != rk) libRaceOrigin[rk] = ro;
+                }
                 if (row.Skin.Length > 0 && FormKey.TryFactory(row.Skin, out var sk)) n.WornArmor.SetTo(sk);
                 libOrigEid[n.FormKey] = row.Npc;
                 void PoolLib(string race, bool overlay)
@@ -417,7 +427,7 @@ static class Generate
                 // those can also be modified with SkyPatcher"). A NATIVE draw adopts the donor's race exactly as
                 // ESP mode does (custom khajiit breeds etc.) via `race=`; an OVERLAY draw keeps the target's race by
                 // design (head-compat group, e.g. base<->vampire) and emits nothing. Same race -> nothing.
-                if (!face.Overlay && dn.Race.FormKey != t.Race.FormKey)
+                if (!face.Overlay && !SameRace(dn.Race.FormKey, t.Race.FormKey))
                 {
                     var rk = dn.Race.FormKey;
                     baseOps.Add($"race={rk.ModKey.FileName}|{rk.ID:X}");
@@ -494,8 +504,10 @@ static class Generate
         // Boost injects EXTRA clones into vanilla leveled lists — meaningless for a load-order scan of
         // placed unique actors (no per-NPC "slot count"). Silently a no-op there; the UI hides it too.
         if (boost && scan) Console.WriteLine("\nLeveled-List Boost: not applicable to a load-order scan category — skipped.");
-        if (boost && skypatcher) Console.WriteLine("\nLeveled-List Boost: not available in SkyPatcher runtime mode (no NPC records are written) — skipped.");
-        if (boost && !scan && !skypatcher)
+        // Runtime mode + Boost = the "partial SkyPatcher" build: the clones are NEW records in this (ESPFE)
+        // plugin, injected into the leveled lists exactly as in ESP mode, but they carry NO face data of their
+        // own — each gets a copyVisualStyle line from its donor (in-plugin or library) like every other target.
+        if (boost && !scan)
         {
             // which LeveledNpc lists each vanilla NPC sits in, with the entry's level+count
             var lvlnOfNpc = new Dictionary<FormKey, List<(FormKey ll, short lvl, short cnt)>>();
@@ -537,18 +549,42 @@ static class Generate
                     var fk = outMod.GetNextFormKey();
                     var clone = (Npc)donor.Duplicate(fk);
                     outMod.Npcs.Add(clone);
-                    ApplyFaceFields(clone, face);
-                    if (female && !Fem(donor))
-                    {
-                        clone.Configuration.Flags |= NpcConfiguration.Flag.Female;
-                        if (TryFemVoice(donor.Voice.FormKey, race, fk.ID, out var fvk)) clone.Voice.SetTo(fvk); else unmappedVoice++;
-                        feminizedNpcs.Add((outName, fk.ID, donor.Name?.String ?? ""));
-                        femRace[(outName, fk.ID)] = RaceOf(clone.Race.FormKey);   // clone's FINAL race (adopted from the face) -> feminine height
-                    }
                     clone.EditorID = $"FDA{ShortRace(race)}{(female ? "F" : "M")}{seq++:D3}";
-                    var fg = CopyFaceGen(assets[face.Folder], face.Npc.FormKey.ModKey.FileName, face.Npc.FormKey.ID, fk.ID, outFolder, outName);
-                    if (fg == null) missingFaceGen.Add($"BOOST {clone.EditorID} <= {face.Npc.EditorID}");
-                    else if (face.Disable || bakeTextures) foreach (var tex in DdsPathsInNif(fg)) ExtractAsset(assets[face.Folder], tex);
+                    if (skypatcher)
+                    {
+                        // face at load via copyVisualStyle — same ops as an override target (race/skin/weight)
+                        var dn = Donor(face);
+                        if (face.Library && !libraryPlugins.Any(p => string.Equals(p, dn.FormKey.ModKey.FileName, StringComparison.OrdinalIgnoreCase))) libraryPlugins.Add(dn.FormKey.ModKey.FileName);
+                        var ops = new List<string> { $"copyVisualStyle={dn.FormKey.ModKey.FileName}|{dn.FormKey.ID:X}" };
+                        if (!face.Overlay && !SameRace(dn.Race.FormKey, clone.Race.FormKey))
+                        { ops.Add($"race={dn.Race.FormKey.ModKey.FileName}|{dn.Race.FormKey.ID:X}"); raceSwitched++; }
+                        if (!dn.WornArmor.IsNull && dn.WornArmor.FormKey != clone.WornArmor.FormKey)
+                        { ops.Add($"skin={dn.WornArmor.FormKey.ModKey.FileName}|{dn.WornArmor.FormKey.ID:X}"); skinOps++; }
+                        if (Math.Abs(dn.Weight - clone.Weight) > 0.01f)
+                        { ops.Add("weight=" + dn.Weight.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)); weightMatched++; }
+                        if (female && !Fem(donor))
+                        {
+                            clone.Configuration.Flags |= NpcConfiguration.Flag.Female;   // on the record itself (it's ours)
+                            if (TryFemVoice(donor.Voice.FormKey, race, fk.ID, out var fvk)) clone.Voice.SetTo(fvk); else unmappedVoice++;
+                            feminizedNpcs.Add((outName, fk.ID, donor.Name?.String ?? ""));
+                            femRace[(outName, fk.ID)] = face.Overlay ? race : RaceOf(dn.Race.FormKey);
+                        }
+                        runtimeTargets.Add(((outName, fk.ID), ops, $"; BOOST clone {clone.EditorID} (of {donor.EditorID}) <= donor {dn.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}"));
+                    }
+                    else
+                    {
+                        ApplyFaceFields(clone, face);
+                        if (female && !Fem(donor))
+                        {
+                            clone.Configuration.Flags |= NpcConfiguration.Flag.Female;
+                            if (TryFemVoice(donor.Voice.FormKey, race, fk.ID, out var fvk)) clone.Voice.SetTo(fvk); else unmappedVoice++;
+                            feminizedNpcs.Add((outName, fk.ID, donor.Name?.String ?? ""));
+                            femRace[(outName, fk.ID)] = RaceOf(clone.Race.FormKey);   // clone's FINAL race (adopted from the face) -> feminine height
+                        }
+                        var fg = CopyFaceGen(assets[face.Folder], face.Npc.FormKey.ModKey.FileName, face.Npc.FormKey.ID, fk.ID, outFolder, outName);
+                        if (fg == null) missingFaceGen.Add($"BOOST {clone.EditorID} <= {face.Npc.EditorID}");
+                        else if (face.Disable || bakeTextures) foreach (var tex in DdsPathsInNif(fg)) ExtractAsset(assets[face.Folder], tex);
+                    }
                     foreach (var (ll, lvl, cnt) in lvlnOfNpc[donor.FormKey])
                         skyLines.Add($"filterByLLs=Skyrim.esm|{ll.ID:X}:addOnceToLLs={outName}|{fk.ID:X}~{lvl}~{cnt}");
                     boostAdded++; boostReport[race] = boostReport.GetValueOrDefault(race) + 1;
