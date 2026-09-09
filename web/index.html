@@ -868,11 +868,13 @@ function renderSourceFilter(){
   if(srcs.includes(cur)) $('#sourceFilter').value = cur;
 }
 
+// The race filter matches every race a face SERVES (own pool race + `as:` double-dip + `serve:` adopt), so a
+// custom-race face mapped onto Imperial shows up under Imperial — the same rule as usability and coverage.
 function renderRaceFilter(){
-  const races = [...new Set(state.faces.map(f=>f.poolRace))].sort();
+  const races = [...new Set(state.faces.flatMap(servedRaces))].sort();
   const cur = $('#raceFilter').value;
   $('#raceFilter').innerHTML = '<option value="">all races</option>' +
-    races.map(r=>`<option value="${esc(r)}">${esc(r)} (${state.faces.filter(f=>f.poolRace===r).length})</option>`).join('');
+    races.map(r=>`<option value="${esc(r)}">${esc(r)} (${state.faces.filter(f=>servedRaces(f).includes(r)).length})</option>`).join('');
   if(races.includes(cur)) $('#raceFilter').value = cur;
 }
 
@@ -881,7 +883,7 @@ function visibleFaces(){
   return state.faces.filter(f =>
     (!src || f.source===src) &&
     (!g || f.sex===g) &&
-    (!r || f.poolRace===r) &&
+    (!r || servedRaces(f).includes(r)) &&
     (!q || (f.editorID||'').toLowerCase().includes(q) || f.source.toLowerCase().includes(q)));
 }
 
