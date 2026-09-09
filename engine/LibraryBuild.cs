@@ -16,17 +16,30 @@ using Mutagen.Bethesda.Plugins.Binary.Parameters;
 // and the meshes/textures those records name are baked in. Result: a plugin whose only masters are the
 // base game, installable in any MO2 instance on its own, that SkyPatcher configs reference by
 // copyVisualStyle=<this plugin>|<donor>. The map (yaml + csv) records donor <-> original face.
+//
+// `Execute(..., dryRun: true)` runs the SAME indexing + closure without writing or baking, so the UI's
+// ESPFE/ESP projection is the engine's own count, never a parallel estimate.
 static class LibraryBuild
 {
     static readonly HashSet<string> Base = Classify.BaseMasters;
 
+    // AssetDirs = mod folders searched for the sources' masters (always) and, when BakeCrossMod, for a face's
+    // brow/eye/hair textures that live in other packs.
+    public record Options(string Game, string OutFolder, string OutName, List<string> Sources, HashSet<string>? Include,
+                          List<string> AssetDirs, string? MapPath, bool BakeCrossMod = true);
+    public record Result(int Donors, int NewRecords, bool Esl, Dictionary<string, int> CopiedByType, List<string> Masters,
+                         List<string> ExtraMasters, Dictionary<string, int> Unresolved, List<string> MissingMasters, int Baked,
+                         List<string> MissingFaceGen, int DanglingDropped, Dictionary<string, int> FacesPerPlugin,
+                         Dictionary<string, Library.RaceCount> FacesPerRace, string? Esp);
+
     public static int Run(string[] args)
     {
         string? game = null, outFolder = null, outName = null, includePath = null, assetDirsPath = null, mapPath = null;
-        var sources = new List<string>();
+        var sources = new List<string>(); bool crossMod = true;
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
+                case "--no-cross-mod": crossMod = false; break;         // masters are still found in --asset-dirs; only other packs' textures aren't baked
                 case "--game": game = args[++i]; break;
                 case "--out": outFolder = args[++i]; break;
                 case "--name": outName = args[++i]; break;
@@ -37,14 +50,33 @@ static class LibraryBuild
             }
         if (game is null || outFolder is null || outName is null || sources.Count == 0)
         { Console.Error.WriteLine("need --game --out --name and at least one --source"); return 1; }
-
         var include = includePath is not null && File.Exists(includePath)
             ? new HashSet<string>(File.ReadAllLines(includePath).Select(l => l.Trim()).Where(l => l.Length > 0), StringComparer.OrdinalIgnoreCase)
             : null;
         var assetDirs = assetDirsPath is not null && File.Exists(assetDirsPath)
             ? File.ReadAllLines(assetDirsPath).Select(l => l.Trim()).Where(l => l.Length > 0 && Directory.Exists(l)).ToList()
             : new List<string>();
-        var resolver = assetDirs.Count > 0
+
+        Result r;
+        try { r = Execute(new Options(game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod), dryRun: false); }
+        catch (InvalidOperationException e) { Console.Error.WriteLine(e.Message); return 1; }
+
+        var byType = string.Join(", ", r.CopiedByType.OrderByDescending(k => k.Value).Select(k => $"{k.Value} {k.Key}"));
+        if (r.DanglingDropped > 0) Console.WriteLine($"Dropped {r.DanglingDropped} dangling link(s) to records that do not exist in their plugin (broken in the source; the game ignores them too).");
+        Console.WriteLine($"Library build {outName}: {r.Donors} donor faces from {sources.Count} source(s); copied {byType}; {r.Baked} assets baked.");
+        Console.WriteLine($"Output is {(r.Esl ? "ESL-flagged (ESPFE)" : "a FULL ESP")} — {r.NewRecords} new records.");
+        Console.WriteLine("Masters: " + string.Join(", ", r.Masters) + (r.ExtraMasters.Count == 0 ? "  (base game only — fully self-contained)" : "  <- NOTE non-vanilla masters remain, see README"));
+        if (r.MissingMasters.Count > 0) Console.WriteLine("WARNING masters not found: " + string.Join(", ", r.MissingMasters));
+        if (r.MissingFaceGen.Count > 0) Console.WriteLine($"missingFaceGen={r.MissingFaceGen.Count}: " + string.Join("; ", r.MissingFaceGen.Take(6)));
+        var stem = Path.GetFileNameWithoutExtension(outName);
+        Console.WriteLine($"Wrote {r.Esp} + {stem}_map.yaml/.csv" + (mapPath is not null ? $" (+ {mapPath})" : ""));
+        return 0;
+    }
+
+    public static Result Execute(Options o, bool dryRun)
+    {
+        var (game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod) = o;
+        var resolver = crossMod && assetDirs.Count > 0
             ? new LoadOrderAssets(assetDirs.Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList()) : null;
 
         var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
@@ -110,6 +142,7 @@ static class LibraryBuild
         }
         void Bake(string folder, string rel)
         {
+            if (dryRun) return;
             rel = rel.Replace('/', '\\').TrimStart('\\');
             if (rel.Length == 0 || rel.Contains("facegendata\\", StringComparison.OrdinalIgnoreCase) || IsSharedSkin(rel)) return;
             if (!extracted.Add(rel)) return;
@@ -120,7 +153,7 @@ static class LibraryBuild
         }
         void BakeModel(string folder, string? model)
         {
-            if (string.IsNullOrWhiteSpace(model)) return;
+            if (dryRun || string.IsNullOrWhiteSpace(model)) return;
             var rel = model.Replace('/', '\\').TrimStart('\\');
             if (!rel.StartsWith("meshes\\", StringComparison.OrdinalIgnoreCase)) rel = "meshes\\" + rel;
             var variants = new List<string> { rel };
@@ -136,7 +169,7 @@ static class LibraryBuild
         }
         void BakeTexture(string folder, string? tex)
         {
-            if (string.IsNullOrWhiteSpace(tex)) return;
+            if (dryRun || string.IsNullOrWhiteSpace(tex)) return;
             var rel = tex.Replace('/', '\\').TrimStart('\\');
             if (!rel.StartsWith("textures\\", StringComparison.OrdinalIgnoreCase)) rel = "textures\\" + rel;
             Bake(folder, rel);
@@ -146,10 +179,13 @@ static class LibraryBuild
         var map = new LibraryMap { Plugin = outName, Built = DateTime.Now.ToString("yyyy-MM-dd HH:mm") };
         var donors = new List<(Npc npc, INpcGetter src, string sp, string folder)>();
         var missingFaceGen = new List<string>();
+        var facesPerPlugin = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var facesPerRace = new Dictionary<string, Library.RaceCount>(StringComparer.OrdinalIgnoreCase);
         int seq = 0;
         foreach (var sp in sources)
         {
             var name = Path.GetFileName(sp);
+            facesPerPlugin[name] = 0;
             if (!loaded.TryGetValue(name, out var ld)) continue;
             var folder = Path.GetDirectoryName(Path.GetFullPath(sp))!;
             foreach (var s in ld.mod.Npcs)
@@ -171,13 +207,20 @@ static class LibraryBuild
                 d.FaceParts = s.FaceParts?.DeepCopy();
                 d.TextureLighting = s.TextureLighting;   // QNAM — must match the FaceGen or the neck seams
                 outMod.Npcs.Add(d);
-                var fg = Generate.CopyFaceGen(assets[folder], s.FormKey.ModKey.FileName, s.FormKey.ID, fk.ID, outFolder, outName);
-                if (fg is null) missingFaceGen.Add($"{d.EditorID} <= {s.EditorID} ({name})");
-                else foreach (var tex in Generate.DdsPathsInNif(fg)) Bake(folder, tex);
+                if (!dryRun)
+                {
+                    var fg = Generate.CopyFaceGen(assets[folder], s.FormKey.ModKey.FileName, s.FormKey.ID, fk.ID, outFolder, outName);
+                    if (fg is null) missingFaceGen.Add($"{d.EditorID} <= {s.EditorID} ({name})");
+                    else foreach (var tex in Generate.DdsPathsInNif(fg)) Bake(folder, tex);
+                }
                 donors.Add((d, s, sp, folder));
+                facesPerPlugin[name]++;
+                var pr = Base.Contains(s.FormKey.ModKey.FileName) && esmNpcRace.TryGetValue(s.FormKey, out var vr0) ? RaceOf(vr0) : RaceOf(s.Race.FormKey);
+                if (!facesPerRace.TryGetValue(pr, out var rc)) facesPerRace[pr] = rc = new Library.RaceCount();
+                if (Fem(s)) rc.F++; else rc.M++;
             }
         }
-        if (donors.Count == 0) { Console.Error.WriteLine("no faces to build (empty selection?)"); return 1; }
+        if (donors.Count == 0) throw new InvalidOperationException("no faces to build (empty selection?)");
 
         // ---- transitive closure: every non-vanilla record the donors reach, copied in and re-linked. A type
         // outside the allow-list (spells, factions, outfits, packages...) is deliberately NOT copied — it is
@@ -257,17 +300,25 @@ static class LibraryBuild
         }
         if (danglingDropped > 0)
         {
-            Console.WriteLine($"Dropped {danglingDropped} dangling link(s) to records that do not exist in their plugin (broken in the source; the game ignores them too).");
-            // those links are no longer 'unresolved'
-            unresolved.Clear();
+            unresolved.Clear();   // those links are no longer 'unresolved'
             foreach (var r in outMod.EnumerateMajorRecords()) foreach (var l in r.EnumerateFormLinks())
                 if (!l.FormKey.IsNull && !Base.Contains(l.FormKey.ModKey.FileName) && l.FormKey.ModKey != outMod.ModKey)
                     unresolved[l.FormKey.ModKey.FileName] = unresolved.GetValueOrDefault(l.FormKey.ModKey.FileName) + 1;
         }
+        missingMasters = missingMasters.Where(m => unresolved.ContainsKey(m)).ToList();   // only matters if still pointed at
 
-        // ---- write (ESL when the record count fits), re-read masters, map, README
         int newRecs = outMod.EnumerateMajorRecords().Count(r => r.FormKey.ModKey == outMod.ModKey);
         outMod.IsSmallMaster = newRecs <= 2048;
+
+        if (dryRun)
+        {
+            foreach (var l in loaded.Values) if (l.mod is IDisposable dd) { try { dd.Dispose(); } catch { } }
+            var extra = unresolved.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, new List<string>(), extra, unresolved,
+                              missingMasters, 0, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, null);
+        }
+
+        // ---- write (ESL when the record count fits), re-read masters, map, README
         Directory.CreateDirectory(outFolder);
         var esp = Path.Combine(outFolder, outName);
         outMod.WriteToBinary(esp, new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
@@ -276,8 +327,6 @@ static class LibraryBuild
         using (var mm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(esp), GameCfg.Release))
             masters = mm.ModHeader.MasterReferences.Select(m => m.Master.FileName.ToString()).ToList();
         var extraMasters = masters.Where(m => !Base.Contains(m)).ToList();
-        // a master we couldn't open only matters if something actually still points into it
-        missingMasters = missingMasters.Where(m => unresolved.ContainsKey(m)).ToList();
 
         foreach (var (d, s, sp, folder) in donors)
             map.Faces.Add(new LibraryMap.Row
@@ -305,6 +354,7 @@ static class LibraryBuild
                     + "  from these plugins, so they must stay enabled: " + string.Join(", ", extraMasters) + "\n"
                     + "  (" + string.Join("; ", unresolved.Where(u => extraMasters.Contains(u.Key)).Select(u => $"{u.Value} links -> {u.Key}")) + ")\n");
         else rd.Append("  No source mod is needed: this plugin depends on the base game only.\n");
+        if (danglingDropped > 0) rd.Append($"  {danglingDropped} dangling link(s) dropped (records a source's master never defines — broken in the source; the game ignores them).\n");
         if (missingMasters.Count > 0) rd.Append("WARNING — masters not found on this PC (their records could not be copied): " + string.Join(", ", missingMasters) + "\n");
         rd.Append("\nUSE: add this build as a source in Mod Creator (it appears under \"Library builds\") with 'Build as SkyPatcher file' —\n"
                 + $"the config references copyVisualStyle={outName}|<donor>. Keep the build installed and enabled wherever those configs run.\n"
@@ -314,13 +364,7 @@ static class LibraryBuild
         if (missingFaceGen.Count > 0) rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
         File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
 
-        Console.WriteLine($"Library build {outName}: {donors.Count} donor faces from {sources.Count} source(s); copied " +
-                          string.Join(", ", copiedByType.OrderByDescending(k => k.Value).Select(k => $"{k.Value} {k.Key}")) + $"; {bakedAssets} assets baked.");
-        Console.WriteLine($"Output is {(outMod.IsSmallMaster ? "ESL-flagged (ESPFE)" : "a FULL ESP")} — {newRecs} new records.");
-        Console.WriteLine("Masters: " + string.Join(", ", masters) + (extraMasters.Count == 0 ? "  (base game only — fully self-contained)" : "  <- NOTE non-vanilla masters remain, see README"));
-        if (missingMasters.Count > 0) Console.WriteLine("WARNING masters not found: " + string.Join(", ", missingMasters));
-        if (missingFaceGen.Count > 0) Console.WriteLine($"missingFaceGen={missingFaceGen.Count}: " + string.Join("; ", missingFaceGen.Take(6)));
-        Console.WriteLine($"Wrote {esp} + {stem}_map.yaml/.csv" + (mapPath is not null ? $" (+ {mapPath})" : ""));
-        return 0;
+        return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, masters, extraMasters, unresolved,
+                          missingMasters, bakedAssets, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, esp);
     }
 }

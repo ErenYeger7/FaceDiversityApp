@@ -208,6 +208,7 @@ static class Serve
                 }
                 case "/api/library/builds": Send(ctx, 200, "application/json", Json(LibraryMap.List())); return;
                 case "/api/library/build" when ctx.Request.HttpMethod == "POST": HandleLibraryBuild(ctx); return;
+                case "/api/library/plan" when ctx.Request.HttpMethod == "POST": HandleLibraryPlan(ctx); return;
                 case "/api/library/blacklist":
                 {
                     if (ctx.Request.HttpMethod == "POST") { HandleSaveBlacklist(ctx); return; }
@@ -596,8 +597,91 @@ static class Serve
         return (code, sw.ToString());
     }
 
-    // ---- library build: ONE self-contained plugin from every curated mod's whitelisted faces ----
-    record LibraryBuildReq(string? Name, bool BakeTextures = true);
+    // ---- library build: ONE self-contained plugin from the curated mods' whitelisted faces ----
+
+    // Curated plugins = every whitelist file; each located among the installed mods (enabled or not — the build
+    // harvests files, it doesn't care about the load order); the include list = whitelisted keys minus the
+    // global blacklist, as face ids. `only` narrows to a subset (smaller builds that stay ESPFE).
+    record CuratedPlugin(string Plugin, bool Installed, int Faces, string? Folder, Dictionary<string, Library.RaceCount>? Summary);
+    record Curated(List<string> Sources, List<string> Include, List<CuratedPlugin> Plugins, List<string> NotInstalled, List<string> Empty);
+    static Curated CuratedSources(HashSet<string>? only)
+    {
+        var modsDir = Path.Combine(Library.Root(), "mods");
+        var installed = ScanMods(Mods, null);
+        var blacklist = Library.LoadBlacklist();
+        var sources = new List<string>(); var include = new List<string>(); var notInstalled = new List<string>(); var empty = new List<string>();
+        var plugins = new List<CuratedPlugin>();
+        if (Directory.Exists(modsDir))
+            foreach (var y in Directory.EnumerateFiles(modsDir, "*.yaml").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                var plugin = Path.GetFileNameWithoutExtension(y);   // "<plugin>.yaml" -> "<plugin>"
+                var keys = Library.LoadWhitelist(plugin) ?? new HashSet<string>();
+                var wanted = keys.Where(k => !blacklist.Contains(k)).ToList();
+                var mod = installed.FirstOrDefault(m => m.Plugins.Contains(plugin, StringComparer.OrdinalIgnoreCase));
+                plugins.Add(new CuratedPlugin(plugin, mod is not null, wanted.Count, mod?.Folder, Library.LoadWhitelistSummary(plugin)));
+                if (wanted.Count == 0) { empty.Add(plugin); continue; }
+                if (mod is null) { notInstalled.Add(plugin); continue; }
+                if (only is not null && !only.Contains(plugin)) continue;
+                sources.Add(Path.Combine(mod.Folder, plugin));
+                include.AddRange(wanted.Select(k => $"{plugin}#{k}"));
+            }
+        return new Curated(sources, include, plugins, notInstalled, empty);
+    }
+    // Every installed mod folder, enabled first (priority): where the sources' masters (CS_Visions.esp for
+    // CS_Foundation) and cross-mod face textures are looked up. Always all of them — a master lives in its own
+    // mod folder, not the source's.
+    static List<string> LibraryAssetDirs()
+    {
+        var profileDir = Path.Combine(Profiles, Profile);
+        return LoadOrderScan.EnabledMods(profileDir, Mods).Select(m => m.folder)
+            .Concat(LoadOrderScan.DisabledMods(profileDir, Mods).Select(m => m.folder)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // Dry-run: the engine's own indexing + closure over the selected curated plugins, so the UI's ESPFE/ESP
+    // projection and per-race totals are exactly what a build would produce.
+    record LibraryPlanReq(List<string>? Plugins);
+    static void HandleLibraryPlan(HttpListenerContext ctx)
+    {
+        string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
+        LibraryPlanReq? req;
+        try { req = JsonSerializer.Deserialize<LibraryPlanReq>(body, J) ?? new LibraryPlanReq(null); }
+        catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); return; }
+        var only = req.Plugins is null ? null : new HashSet<string>(req.Plugins, StringComparer.OrdinalIgnoreCase);
+        var cur = CuratedSources(only);
+        object? plan = null; string? error = null;
+        if (cur.Sources.Count > 0)
+        {
+            try
+            {
+                var res = LibraryBuild.Execute(new LibraryBuild.Options(Game, Path.GetTempPath(), "FDA_Library_plan.esp", cur.Sources,
+                    new HashSet<string>(cur.Include, StringComparer.OrdinalIgnoreCase), LibraryAssetDirs(), null, BakeCrossMod: false), dryRun: true);
+                // per-race totals incl. the whitelists' `as:`/`serve:` extra races (what the faces can serve, like Mod Creator counts)
+                var perRace = new Dictionary<string, Library.RaceCount>(res.FacesPerRace, StringComparer.OrdinalIgnoreCase);
+                var inc = new HashSet<string>(cur.Include, StringComparer.OrdinalIgnoreCase);
+                foreach (var p in cur.Plugins.Where(p => only is null || only.Contains(p.Plugin)))
+                {
+                    var ents = Library.LoadWhitelistEntries(p.Plugin);
+                    foreach (var e in ents)
+                    {
+                        if (!inc.Contains($"{p.Plugin}#{e.Key.Trim()}")) continue;
+                        foreach (var extra in new[] { e.As, e.Serve })
+                        {
+                            if (string.IsNullOrWhiteSpace(extra)) continue;
+                            if (!perRace.TryGetValue(extra.Trim(), out var c)) perRace[extra.Trim()] = c = new Library.RaceCount();
+                            if (string.Equals(e.Sex, "M", StringComparison.OrdinalIgnoreCase)) c.M++; else c.F++;
+                        }
+                    }
+                }
+                plan = new { donors = res.Donors, records = res.NewRecords, esl = res.Esl, byType = res.CopiedByType, extraMasters = res.ExtraMasters,
+                             unresolved = res.Unresolved, missingMasters = res.MissingMasters, dangling = res.DanglingDropped,
+                             facesPerPlugin = res.FacesPerPlugin, perRace };
+            }
+            catch (Exception e) { error = e.Message; }
+        }
+        Send(ctx, 200, "application/json", Json(new { plugins = cur.Plugins, notInstalled = cur.NotInstalled, empty = cur.Empty, plan, error }));
+    }
+
+    record LibraryBuildReq(string? Name, bool BakeTextures = true, List<string>? Plugins = null);
     static void HandleLibraryBuild(HttpListenerContext ctx)
     {
         string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
@@ -609,39 +693,20 @@ static class Serve
         var stem = Path.GetFileNameWithoutExtension(name);
         var outFolder = Path.Combine(OutDir, stem);
 
-        // curated plugins = every whitelist file; locate each plugin among the installed mods (enabled or not —
-        // the build harvests files, it doesn't care about the load order); the include list = whitelisted keys
-        // minus the global blacklist, as face ids.
-        var modsDir = Path.Combine(Library.Root(), "mods");
-        var installed = ScanMods(Mods, null);
-        var blacklist = Library.LoadBlacklist();
-        var sources = new List<string>(); var include = new List<string>(); var notInstalled = new List<string>(); var empty = new List<string>();
-        if (Directory.Exists(modsDir))
-            foreach (var y in Directory.EnumerateFiles(modsDir, "*.yaml").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
-            {
-                var plugin = Path.GetFileNameWithoutExtension(y);   // "<plugin>.yaml" -> "<plugin>"
-                var keys = Library.LoadWhitelist(plugin) ?? new HashSet<string>();
-                var wanted = keys.Where(k => !blacklist.Contains(k)).ToList();
-                if (wanted.Count == 0) { empty.Add(plugin); continue; }
-                var mod = installed.FirstOrDefault(m => m.Plugins.Contains(plugin, StringComparer.OrdinalIgnoreCase));
-                if (mod is null) { notInstalled.Add(plugin); continue; }
-                sources.Add(Path.Combine(mod.Folder, plugin));
-                include.AddRange(wanted.Select(k => $"{plugin}#{k}"));
-            }
+        var only = req.Plugins is null ? null : new HashSet<string>(req.Plugins, StringComparer.OrdinalIgnoreCase);
+        var cur = CuratedSources(only);
+        var sources = cur.Sources; var include = cur.Include; var notInstalled = cur.NotInstalled; var empty = cur.Empty;
         if (sources.Count == 0)
-        { Send(ctx, 400, "application/json", Json(new { error = "no curated faces to build: save at least one whitelist in Library mode" + (notInstalled.Count > 0 ? $" (curated but not installed here: {string.Join(", ", notInstalled)})" : "") })); return; }
+        { Send(ctx, 400, "application/json", Json(new { error = "no curated faces to build: save at least one whitelist in Curate mode" + (notInstalled.Count > 0 ? $" (curated but not installed here: {string.Join(", ", notInstalled)})" : "") })); return; }
 
         var includeFile = Path.Combine(Path.GetTempPath(), $"facediv-libinc-{Guid.NewGuid():N}.txt");
         File.WriteAllLines(includeFile, include);
-        // mod folders to find sources' masters + cross-mod textures in: enabled first (priority), then the rest
-        var profileDir = Path.Combine(Profiles, Profile);
-        var dirs = LoadOrderScan.EnabledMods(profileDir, Mods).Select(m => m.folder)
-            .Concat(LoadOrderScan.DisabledMods(profileDir, Mods).Select(m => m.folder)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var dirsFile = Path.Combine(Path.GetTempPath(), $"facediv-libdirs-{Guid.NewGuid():N}.txt");
-        File.WriteAllLines(dirsFile, req.BakeTextures ? dirs : dirs.Where(d => sources.Any(s => s.StartsWith(d, StringComparison.OrdinalIgnoreCase))));
+        File.WriteAllLines(dirsFile, LibraryAssetDirs());
         var mapPath = Path.Combine(LibraryMap.BuildsDir(), stem + ".yaml");
 
         var a = new List<string> { "build-library", "--game", Game, "--out", outFolder, "--name", name, "--include", includeFile, "--asset-dirs", dirsFile, "--map", mapPath };
+        if (!req.BakeTextures) a.Add("--no-cross-mod");
         foreach (var s in sources) { a.Add("--source"); a.Add(s); }
         var (code, log) = CaptureRun(a.ToArray(), LibraryBuild.Run);
         try { File.Delete(includeFile); File.Delete(dirsFile); } catch { }

@@ -125,9 +125,10 @@ window.addEventListener('unhandledrejection',function(ev){
 <header>
   <h1>FaceDiversityApp</h1>
   <span class="sub" id="hdrSub">personal use only — do not redistribute</span>
-  <div class="modeToggle" style="margin-left:auto" title="Mod Creator builds an output mod; Library curates which faces you keep (whitelist) + blacklist NPCs">
+  <div class="modeToggle" style="margin-left:auto" title="Mod Creator builds an output mod; Curate picks which faces you keep (whitelist) + blacklists NPCs; Library build packs curated faces into self-contained plugins">
     <button id="modeCreator" class="on">Mod Creator</button>
-    <button id="modeLibrary">Library</button>
+    <button id="modeLibrary">Curate</button>
+    <button id="modeBuild">Library build</button>
   </div>
 </header>
 
@@ -261,17 +262,22 @@ window.addEventListener('unhandledrejection',function(ev){
         <div id="saveLibOut"></div>
       </div>
       <div class="card">
-        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">LIBRARY PLUGIN — self-contained face library</h3>
-        <div class="muted" style="margin-bottom:8px">Builds <b>one plugin</b> from every curated mod's whitelisted faces (blacklist applied): each face becomes a donor NPC with its FaceGen, head parts, custom race and skin <b>copied in</b>, so the plugin needs no source mods and travels between MO2 instances. In <b>Mod Creator</b> it appears as a source under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;build&gt;|&lt;donor&gt;</code>). Dated names tell you which build a config was made with.</div>
-        <label style="display:block;margin-bottom:6px">Plugin name <input id="libBuildName" style="width:100%" placeholder="FDA_Library_yymmdd.esp"></label>
-        <label class="chk"><input type="checkbox" id="libBuildBake" checked> <span>Bake cross-mod textures <span class="muted">(brows/eyes/hair a face takes from other packs; body skin at vanilla paths is never baked)</span></span></label>
-        <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build library plugin</button>
-        <div id="libBuildOut"></div>
-        <div id="libBuilds" class="muted" style="margin-top:8px"></div>
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">HOW THE LIBRARY IS USED</h3>
+        <div class="muted">In <b>Mod Creator</b> mode, a source that has a saved whitelist contributes only its ticked faces; a source with none behaves exactly as before (all faces pooled). Globally-blacklisted NPCs (right) are removed from every source. The library lives on this PC only and is reused across modlists. <b>Library build</b> (header) packs the curated faces into self-contained plugins.</div>
+      </div>
+    </div>
+
+    <div id="buildMid" class="hidden">
+      <h2>3 · Curated mods → library plugin</h2>
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">Tick the curated mods to pack into <b>one</b> plugin (blacklist applied). Every face becomes a donor NPC with its FaceGen, head parts, custom race and skin <b>copied in</b>, so the plugin needs no source mods and travels between MO2 instances. Keep a build under the <b>2048-record</b> limit and it ships as ESPFE (no load-order slot); split big libraries into several builds — Mod Creator can use several at once.</div>
+        <div class="row" style="margin-bottom:6px"><button class="mini" id="bsAll">All</button><button class="mini" id="bsNone">None</button><span class="muted flex1" style="text-align:right" id="bsCount"></span></div>
+        <div id="buildPlugins"><div class="muted">loading curated mods…</div></div>
+        <div id="buildProj" style="margin-top:8px"></div>
       </div>
       <div class="card">
-        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">HOW THE LIBRARY IS USED</h3>
-        <div class="muted">In <b>Mod Creator</b> mode, a source that has a saved whitelist contributes only its ticked faces; a source with none behaves exactly as before (all faces pooled). Globally-blacklisted NPCs (right) are removed from every source. The library lives on this PC only and is reused across modlists.</div>
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">FACES PER RACE <span class="muted" style="font-weight:normal">— in the ticked mods; “also/serve” picks counted as extra races</span></h3>
+        <table class="cov"><thead><tr><th>Race</th><th style="text-align:right">F</th><th style="text-align:right">M</th><th style="text-align:right">total</th></tr></thead><tbody id="buildRaces"><tr><td colspan="4" class="muted">—</td></tr></tbody></table>
       </div>
     </div>
   </section>
@@ -363,6 +369,21 @@ window.addEventListener('unhandledrejection',function(ev){
         <div class="muted" style="margin-bottom:8px">NPCs you never want from <b>any</b> mod. Click the ⛔ on a face to add it. Keyed by origin FormKey, so it blocks every replacer's take on that NPC — in both modes. Saved instantly to <code>library/blacklisted_npcs.yaml</code>.</div>
         <div class="stat"><span>Blacklisted NPCs</span><b id="blCount">0</b> <span class="muted" id="blSaved" style="margin-left:6px"></span></div>
         <div id="blList" style="margin-top:8px"><div class="muted">none yet</div></div>
+      </div>
+    </div>
+
+    <div id="buildRight" class="hidden">
+      <h2>4 · Build</h2>
+      <div class="card">
+        <div class="muted" style="margin-bottom:8px">The plugin lands under the output root as <code>&lt;name&gt;/</code>; the map (yaml + csv) of donor ↔ original face is written next to it and under <code>library/builds/</code>. In <b>Mod Creator</b> the build appears as a source under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;build&gt;|&lt;donor&gt;</code>). Dated names tell you which build a config was made with.</div>
+        <label style="display:block;margin-bottom:6px">Plugin name <input id="libBuildName" style="width:100%" placeholder="FDA_Library_yymmdd.esp"></label>
+        <label class="chk"><input type="checkbox" id="libBuildBake" checked> <span>Bake cross-mod textures <span class="muted">(brows/eyes/hair a face takes from other packs; body skin at vanilla paths is never baked)</span></span></label>
+        <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build library plugin</button>
+        <div id="libBuildOut"></div>
+      </div>
+      <div class="card">
+        <h3 style="font-size:12px;color:var(--dim);margin-bottom:6px">EXISTING BUILDS</h3>
+        <div id="libBuilds" class="muted"></div>
       </div>
     </div>
   </section>
@@ -1138,20 +1159,32 @@ async function copyAudit(){
 $('#auditCopyBtn').onclick = copyAudit;
 
 // ---------- library mode ----------
+// Three modes: creator (build an output mod), library (= Curate: whitelist faces + blacklist), build (pack the
+// curated faces into self-contained library plugins). Build mode hides the source picker + face table — it
+// works from the saved whitelists, not from the session's sources.
 async function setAppMode(m){
   if(state.mode===m) return;
+  const prev = state.mode;
   state.mode = m;
   $('#modeCreator').classList.toggle('on', m==='creator');
   $('#modeLibrary').classList.toggle('on', m==='library');
+  $('#modeBuild').classList.toggle('on', m==='build');
   document.querySelector('.app').classList.toggle('libmode', m==='library');
   $('#creatorMid').classList.toggle('hidden', m!=='creator');
   $('#creatorRight').classList.toggle('hidden', m!=='creator');
   $('#libraryMid').classList.toggle('hidden', m!=='library');
   $('#libraryRight').classList.toggle('hidden', m!=='library');
+  $('#buildMid').classList.toggle('hidden', m!=='build');
+  $('#buildRight').classList.toggle('hidden', m!=='build');
+  // left pane: sources + faces are per-session inputs the build mode doesn't use
+  for(const el of [$('#modPick').closest('.card'), $('#modPick').closest('.card').previousElementSibling, $('#activeSources'), $('#faceTable').closest('.card'), $('#faceCount').closest('h2')])
+    if(el) el.classList.toggle('hidden', m==='build');
+  if(m==='build'){ await loadBuildPlan(); refreshLibBuilds(); return; }
   if(m==='library' && !state.blLoaded) await loadBlacklist();
   if(m==='library' && state.config.mugshotRoot && !state.mugshotMods.length){
     try{ state.mugshotMods = await api('/api/mugshot-mods'); }catch{ state.mugshotMods = []; }
   }
+  if(prev==='build' && m==='creator') scanMods();   // a new build may have appeared as a source
   await refreshFaces();     // re-fetch: creator=library-filtered pool, library=everything + saved whitelist
   renderBlacklist();
 }
@@ -1201,28 +1234,96 @@ function renderLibSummary(){
   }).join('');
   if(btn) btn.disabled=false;
 }
-// ---------- library plugin build ----------
-function defaultLibName(){ const d=new Date(), p=n=>String(n).padStart(2,'0'); return `FDA_Library_${String(d.getFullYear()).slice(2)}${p(d.getMonth()+1)}${p(d.getDate())}.esp`; }
+// ---------- library build mode ----------
+// Names are dated so a SkyPatcher config says which build it was made with; a second build the same day
+// gets _2, _3… (the existing-builds list decides).
+function defaultLibName(){
+  const d=new Date(), p=n=>String(n).padStart(2,'0');
+  const base=`FDA_Library_${String(d.getFullYear()).slice(2)}${p(d.getMonth()+1)}${p(d.getDate())}`;
+  const taken = new Set((state.libBuilds||[]).map(b=>(b.plugin||'').replace(/\.esp$/i,'').toLowerCase()));
+  let n=1, name=base; while(taken.has(name.toLowerCase())) name=`${base}_${++n}`;
+  return name+'.esp';
+}
 async function refreshLibBuilds(){
   const el=$('#libBuilds'); if(!el) return;
-  let builds=[]; try{ builds = await api('/api/library/builds'); }catch{ builds=[]; }
-  el.innerHTML = builds.length
-    ? '<div style="margin-bottom:4px">Existing builds:</div>' + builds.map(b=>`<div class="stat"><span title="${esc(b.map)}">${esc(b.plugin)} <span class="muted">· ${esc(b.built||'')}</span></span><b>${b.faces} faces</b></div>`).join('')
+  try{ state.libBuilds = await api('/api/library/builds'); }catch{ state.libBuilds=[]; }
+  el.innerHTML = state.libBuilds.length
+    ? state.libBuilds.map(b=>`<div class="stat"><span title="${esc(b.map)}">${esc(b.plugin)} <span class="muted">· ${esc(b.built||'')}</span></span><b>${b.faces} faces</b></div>`).join('')
     : 'No library build yet.';
+  if($('#libBuildName') && !$('#libBuildName').value.trim()) $('#libBuildName').placeholder = defaultLibName();
 }
+// Which curated mods go into the next build (default: every installed one). Re-planned on every change via
+// the engine's dry run, so the ESPFE/ESP verdict is the build's own count.
+let planTimer=null, planSeq=0;
+async function loadBuildPlan(){
+  const list=$('#buildPlugins'), proj=$('#buildProj'), races=$('#buildRaces');
+  const first = !state.buildSel;
+  if(first) list.innerHTML='<div class="muted"><span class="spin"></span> reading curated mods…</div>';
+  proj.innerHTML='<div class="muted"><span class="spin"></span> projecting (engine dry run)…</div>';
+  const seq=++planSeq;
+  let r;
+  try{ r = await api('/api/library/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ plugins: first ? null : [...state.buildSel] })}); }
+  catch(e){ proj.innerHTML=`<div class="warnbox">✘ ${esc(e&&e.message?e.message:e)}</div>`; return; }
+  if(seq!==planSeq) return;   // a newer plan is in flight
+  if(first) state.buildSel = new Set(r.plugins.filter(p=>p.installed && p.faces>0).map(p=>p.plugin));
+  state.buildPlugins = r.plugins;
+  renderBuildPlugins(r);
+  renderBuildProjection(r);
+}
+function renderBuildPlugins(r){
+  const rows = r.plugins.map(p=>{
+    const on = state.buildSel.has(p.plugin), ok = p.installed && p.faces>0;
+    const sum = summaryText(p.summary);
+    const note = !p.installed ? ' <span class="muted">· not installed here</span>' : (p.faces===0 ? ' <span class="muted">· no faces ticked</span>' : '');
+    return `<label class="m" style="cursor:${ok?'pointer':'default'};opacity:${ok?1:.55}">
+      <input type="checkbox" ${on?'checked':''} ${ok?'':'disabled'} onchange="togBuildPlugin('${jsq(p.plugin)}',this.checked)">
+      <div style="flex:1;min-width:0"><div class="mn">${esc(p.plugin)} <span class="muted">· ${p.faces} face${p.faces===1?'':'s'}</span>${note}</div>
+      ${sum?`<div class="lsum" title="${esc(sum.title)}">📚 ${esc(sum.text)}</div>`:''}</div></label>`;
+  });
+  $('#buildPlugins').innerHTML = rows.length ? rows.join('') : '<div class="muted">No curated mod yet — tick faces in <b>Curate</b> and save a whitelist first.</div>';
+  const nSel=[...state.buildSel].length, nFaces=r.plugins.filter(p=>state.buildSel.has(p.plugin)).reduce((n,p)=>n+p.faces,0);
+  $('#bsCount').textContent = `${nSel} mod${nSel===1?'':'s'} · ${nFaces} faces`;
+}
+function renderBuildProjection(r){
+  const proj=$('#buildProj'), races=$('#buildRaces');
+  if(!r.plan){
+    proj.innerHTML = r.error ? `<div class="warnbox">✘ ${esc(r.error)}</div>` : '<div class="muted">Nothing selected.</div>';
+    races.innerHTML='<tr><td colspan="4" class="muted">—</td></tr>'; $('#libBuildBtn').disabled=true; return;
+  }
+  const p=r.plan, esl=p.esl;
+  const copies = Object.entries(p.byType||{}).sort((a,b)=>b[1]-a[1]).map(([t,n])=>`${n} ${t}`).join(', ');
+  proj.innerHTML = `<div class="warnbox" style="${esl?'background:rgba(91,157,255,.1);border-color:rgba(91,157,255,.35);color:#a9c9ff':'background:rgba(255,176,72,.1);border-color:rgba(255,176,72,.4);color:#ffd9a3'}">`
+    + `Projected build: <b>${p.donors}</b> donor NPC${p.donors===1?'':'s'} + copied records (${esc(copies)||'none'}) = <b>${p.records}</b> new records → <b>${esl?'ESPFE (ESL-flagged)':'FULL ESP'}</b>`
+    + (esl ? ' — fits the 2048 limit, no load-order slot.' : ' — exceeds 2048, so it would take a load-order slot. Untick some mods and build them as a second library.')
+    + (p.extraMasters&&p.extraMasters.length ? `<div style="margin-top:4px">⚠ still references records in <b>${esc(p.extraMasters.join(', '))}</b> (kinds the build doesn't copy) — those plugins would remain masters.</div>` : '<div style="margin-top:4px">Masters: base game only — fully self-contained.</div>')
+    + (p.missingMasters&&p.missingMasters.length ? `<div style="margin-top:4px">⚠ masters not installed here: ${esc(p.missingMasters.join(', '))}</div>` : '')
+    + `</div>`;
+  const ents = Object.entries(p.perRace||{}).map(([race,c])=>({race,f:c.f||0,m:c.m||0})).sort((a,b)=>(b.f+b.m)-(a.f+a.m)||a.race.localeCompare(b.race));
+  races.innerHTML = ents.length ? ents.map(e=>`<tr><td>${esc(e.race)}</td><td style="text-align:right">${e.f}</td><td style="text-align:right">${e.m}</td><td style="text-align:right"><b>${e.f+e.m}</b></td></tr>`).join('')
+    + `<tr><td class="muted">total distinct faces</td><td></td><td></td><td style="text-align:right"><b>${p.donors}</b></td></tr>` : '<tr><td colspan="4" class="muted">—</td></tr>';
+  $('#libBuildBtn').disabled = !p.donors;
+}
+window.togBuildPlugin = function(plugin,on){
+  if(on) state.buildSel.add(plugin); else state.buildSel.delete(plugin);
+  clearTimeout(planTimer); planTimer=setTimeout(loadBuildPlan, 250);
+};
+$('#bsAll').onclick  = ()=>{ state.buildSel = new Set((state.buildPlugins||[]).filter(p=>p.installed&&p.faces>0).map(p=>p.plugin)); loadBuildPlan(); };
+$('#bsNone').onclick = ()=>{ state.buildSel = new Set(); loadBuildPlan(); };
 async function buildLibrary(){
   const btn=$('#libBuildBtn'), out=$('#libBuildOut');
   btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> building the library plugin (copies records + FaceGen + textures; can take a few minutes)…</div>';
   let res;
-  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||null, bakeTextures:$('#libBuildBake').checked })}); }
+  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||defaultLibName(), bakeTextures:$('#libBuildBake').checked, plugins:[...(state.buildSel||[])] })}); }
   catch(e){ res={ ok:false, log:'request failed: '+(e&&e.message?e.message:e) }; }
   out.innerHTML = `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ built':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}</div>`
     + `<pre class="log">${esc(res.log||'')}</pre>`
     + (res.readme?`<details><summary class="muted">README.txt</summary><pre class="log">${esc(res.readme)}</pre></details>`:'');
   btn.disabled=false;
-  refreshLibBuilds(); scanMods();   // the build now shows up as a source
+  $('#libBuildName').value='';
+  await refreshLibBuilds();
 }
-if($('#libBuildBtn')){ $('#libBuildBtn').onclick = buildLibrary; $('#libBuildName').placeholder = defaultLibName(); refreshLibBuilds(); }
+if($('#libBuildBtn')){ $('#libBuildBtn').onclick = buildLibrary; }
+$('#modeBuild').onclick = ()=>setAppMode('build');
 
 async function saveLibrary(){
   if(!state.sources.length) return;
