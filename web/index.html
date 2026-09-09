@@ -378,6 +378,7 @@ window.addEventListener('unhandledrejection',function(ev){
         <div class="muted" style="margin-bottom:8px">The plugin lands under the output root as <code>&lt;name&gt;/</code>; the map (yaml + csv) of donor ↔ original face is written next to it and under <code>library/builds/</code>. In <b>Mod Creator</b> the build appears as a source under “Library builds” and feeds <b>SkyPatcher</b> configs (<code>copyVisualStyle=&lt;build&gt;|&lt;donor&gt;</code>). Dated names tell you which build a config was made with.</div>
         <label style="display:block;margin-bottom:6px">Plugin name <input id="libBuildName" style="width:100%" placeholder="FDA_Library_yymmdd.esp"></label>
         <label class="chk"><input type="checkbox" id="libBuildBake" checked> <span>Bake cross-mod textures <span class="muted">(brows/eyes/hair a face takes from other packs; body skin at vanilla paths is never baked)</span></span></label>
+        <label class="chk"><input type="checkbox" id="libBuildBsa" checked> <span>Pack assets into BSA <span class="muted">(LZ4-compressed <code>&lt;name&gt;.bsa</code> + <code>&lt;name&gt; - Textures.bsa</code>, auto-loaded with the plugin; a group over the 4 GB per-archive limit is split into further archives carried by empty ESL dummy plugins; every archive is read back and verified before the loose files are removed)</span></span></label>
         <button class="primary" id="libBuildBtn" style="width:100%;margin-top:8px">Build library plugin</button>
         <div id="libBuildOut"></div>
       </div>
@@ -1313,7 +1314,7 @@ async function buildLibrary(){
   const btn=$('#libBuildBtn'), out=$('#libBuildOut');
   btn.disabled=true; out.innerHTML='<div class="muted" style="margin-top:6px"><span class="spin"></span> building the library plugin (copies records + FaceGen + textures; can take a few minutes)…</div>';
   let res;
-  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||defaultLibName(), bakeTextures:$('#libBuildBake').checked, plugins:[...(state.buildSel||[])] })}); }
+  try{ res = await api('/api/library/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ name:$('#libBuildName').value.trim()||defaultLibName(), bakeTextures:$('#libBuildBake').checked, bsa:$('#libBuildBsa').checked, plugins:[...(state.buildSel||[])] })}); }
   catch(e){ res={ ok:false, log:'request failed: '+(e&&e.message?e.message:e) }; }
   out.innerHTML = `<div class="${res.ok?'':'warnbox'}" style="margin-top:8px">${res.ok?'✔ built':'✘ failed'} ${res.outFolder?('→ '+esc(winPath(res.outFolder))):''}</div>`
     + `<pre class="log">${esc(res.log||'')}</pre>`

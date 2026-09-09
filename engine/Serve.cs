@@ -681,7 +681,7 @@ static class Serve
         Send(ctx, 200, "application/json", Json(new { plugins = cur.Plugins, notInstalled = cur.NotInstalled, empty = cur.Empty, plan, error }));
     }
 
-    record LibraryBuildReq(string? Name, bool BakeTextures = true, List<string>? Plugins = null);
+    record LibraryBuildReq(string? Name, bool BakeTextures = true, List<string>? Plugins = null, bool Bsa = true);
     static void HandleLibraryBuild(HttpListenerContext ctx)
     {
         string body; using (var r = new StreamReader(ctx.Request.InputStream, ctx.Request.ContentEncoding)) body = r.ReadToEnd();
@@ -707,6 +707,7 @@ static class Serve
 
         var a = new List<string> { "build-library", "--game", Game, "--out", outFolder, "--name", name, "--include", includeFile, "--asset-dirs", dirsFile, "--map", mapPath };
         if (!req.BakeTextures) a.Add("--no-cross-mod");
+        if (req.Bsa) a.Add("--bsa");
         foreach (var s in sources) { a.Add("--source"); a.Add(s); }
         var (code, log) = CaptureRun(a.ToArray(), LibraryBuild.Run);
         try { File.Delete(includeFile); File.Delete(dirsFile); } catch { }

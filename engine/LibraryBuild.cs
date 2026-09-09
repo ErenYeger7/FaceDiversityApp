@@ -26,20 +26,21 @@ static class LibraryBuild
     // AssetDirs = mod folders searched for the sources' masters (always) and, when BakeCrossMod, for a face's
     // brow/eye/hair textures that live in other packs.
     public record Options(string Game, string OutFolder, string OutName, List<string> Sources, HashSet<string>? Include,
-                          List<string> AssetDirs, string? MapPath, bool BakeCrossMod = true);
+                          List<string> AssetDirs, string? MapPath, bool BakeCrossMod = true, bool Bsa = false);
     public record Result(int Donors, int NewRecords, bool Esl, Dictionary<string, int> CopiedByType, List<string> Masters,
                          List<string> ExtraMasters, Dictionary<string, int> Unresolved, List<string> MissingMasters, int Baked,
                          List<string> MissingFaceGen, int DanglingDropped, Dictionary<string, int> FacesPerPlugin,
-                         Dictionary<string, Library.RaceCount> FacesPerRace, string? Esp);
+                         Dictionary<string, Library.RaceCount> FacesPerRace, string? Esp, List<string> BsaNotes);
 
     public static int Run(string[] args)
     {
         string? game = null, outFolder = null, outName = null, includePath = null, assetDirsPath = null, mapPath = null;
-        var sources = new List<string>(); bool crossMod = true;
+        var sources = new List<string>(); bool crossMod = true, bsa = false;
         for (int i = 1; i < args.Length; i++)
             switch (args[i])
             {
                 case "--no-cross-mod": crossMod = false; break;         // masters are still found in --asset-dirs; only other packs' textures aren't baked
+                case "--bsa": bsa = true; break;                         // pack meshes/textures into <stem>.bsa + "<stem> - Textures.bsa" (LZ4), verified, loose removed
                 case "--game": game = args[++i]; break;
                 case "--out": outFolder = args[++i]; break;
                 case "--name": outName = args[++i]; break;
@@ -58,7 +59,7 @@ static class LibraryBuild
             : new List<string>();
 
         Result r;
-        try { r = Execute(new Options(game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod), dryRun: false); }
+        try { r = Execute(new Options(game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod, bsa), dryRun: false); }
         catch (InvalidOperationException e) { Console.Error.WriteLine(e.Message); return 1; }
 
         var byType = string.Join(", ", r.CopiedByType.OrderByDescending(k => k.Value).Select(k => $"{k.Value} {k.Key}"));
@@ -68,6 +69,7 @@ static class LibraryBuild
         Console.WriteLine("Masters: " + string.Join(", ", r.Masters) + (r.ExtraMasters.Count == 0 ? "  (base game only — fully self-contained)" : "  <- NOTE non-vanilla masters remain, see README"));
         if (r.MissingMasters.Count > 0) Console.WriteLine("WARNING masters not found: " + string.Join(", ", r.MissingMasters));
         if (r.MissingFaceGen.Count > 0) Console.WriteLine($"missingFaceGen={r.MissingFaceGen.Count}: " + string.Join("; ", r.MissingFaceGen.Take(6)));
+        foreach (var n in r.BsaNotes) Console.WriteLine(n);
         var stem = Path.GetFileNameWithoutExtension(outName);
         Console.WriteLine($"Wrote {r.Esp} + {stem}_map.yaml/.csv" + (mapPath is not null ? $" (+ {mapPath})" : ""));
         return 0;
@@ -75,7 +77,7 @@ static class LibraryBuild
 
     public static Result Execute(Options o, bool dryRun)
     {
-        var (game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod) = o;
+        var (game, outFolder, outName, sources, include, assetDirs, mapPath, crossMod, packBsa) = o;
         var resolver = crossMod && assetDirs.Count > 0
             ? new LoadOrderAssets(assetDirs.Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList()) : null;
 
@@ -315,7 +317,7 @@ static class LibraryBuild
             foreach (var l in loaded.Values) if (l.mod is IDisposable dd) { try { dd.Dispose(); } catch { } }
             var extra = unresolved.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
             return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, new List<string>(), extra, unresolved,
-                              missingMasters, 0, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, null);
+                              missingMasters, 0, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, null, new List<string>());
         }
 
         // ---- write (ESL when the record count fits), re-read masters, map, README
@@ -342,6 +344,66 @@ static class LibraryBuild
         LibraryMap.Save(Path.Combine(outFolder, stem + "_map.yaml"), map);
         if (mapPath is not null) LibraryMap.Save(mapPath, map);
 
+        // ---- optional BSA packing. The game auto-loads exactly TWO archives per plugin: <Plugin>.bsa and
+        // "<Plugin> - Textures.bsa". Meshes (incl. FaceGen geometry) go to the first, textures to the second, LZ4-
+        // compressed (SSE v105). Offsets are 32-bit, so a group over ~4 GiB is split across further archives, each
+        // hung off a tiny empty ESL-flagged dummy plugin (<stem>_2.esp -> <stem>_2.bsa / "<stem>_2 - Textures.bsa")
+        // — the engine-native way to attach more archives; no load-order slot, no mod-manager step. Every archive
+        // is read back with Mutagen and compared byte-for-byte before the loose files are deleted; on any doubt
+        // the loose files stay (they override a BSA anyway) and the archives are removed.
+        var bsaNotes = new List<string>();
+        var dummyPlugins = new SortedSet<int>();
+        if (packBsa)
+        {
+            string OwnerStem(int i) => i == 0 ? stem : $"{stem}_{i + 1}";
+            foreach (var (top, suffix, flags) in new[] { ("meshes", "", BsaWriter.FileFlagMeshes), ("textures", " - Textures", BsaWriter.FileFlagTextures) })
+            {
+                var dir = Path.Combine(outFolder, top);
+                if (!Directory.Exists(dir)) continue;
+                var files = Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
+                    .Select(f => Path.GetRelativePath(outFolder, f)).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
+                if (files.Count == 0) continue;
+                var written = new List<BsaWriter.Result>();
+                try
+                {
+                    written = BsaWriter.WriteSplit(outFolder, files, compress: true, flags, i => Path.Combine(outFolder, OwnerStem(i) + suffix + ".bsa"));
+                    var err = BsaWriter.Verify(written.Select(r => r.Path), outFolder, files);
+                    if (err is not null)
+                    {
+                        foreach (var r in written) try { File.Delete(r.Path); } catch { }
+                        bsaNotes.Add($"BSA ({top}): VERIFY FAILED ({err}) — archives discarded, {files.Count} {top} files left loose.");
+                        continue;
+                    }
+                    foreach (var f in files) File.Delete(Path.Combine(outFolder, f));
+                    foreach (var d in Directory.EnumerateDirectories(dir, "*", SearchOption.AllDirectories).OrderByDescending(d => d.Length))
+                        try { if (!Directory.EnumerateFileSystemEntries(d).Any()) Directory.Delete(d); } catch { }
+                    try { if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir); } catch { }
+                    for (int i = 0; i < written.Count; i++)
+                    {
+                        var r = written[i];
+                        if (i > 0) dummyPlugins.Add(i);
+                        bsaNotes.Add($"BSA {Path.GetFileName(r.Path)}: {r.Files} {top} files, {r.BytesIn / 1048576.0:0.0} MB -> {r.BytesOut / 1048576.0:0.0} MB (LZ4), verified by read-back"
+                                     + (i > 0 ? $" — loaded by dummy plugin {OwnerStem(i)}.esp" : "") + ".");
+                    }
+                }
+                catch (InvalidOperationException e)
+                {
+                    foreach (var r in written) try { File.Delete(r.Path); } catch { }
+                    bsaNotes.Add($"BSA ({top}): not packed — {e.Message}; {files.Count} {top} files left loose.");
+                }
+            }
+            // dummy ESL plugins that carry the overflow archives (header only — no records, no masters)
+            foreach (var i in dummyPlugins)
+            {
+                var dk = ModKey.FromNameAndExtension(OwnerStem(i) + ".esp");
+                var dummy = new SkyrimMod(dk, GameCfg.Release) { IsSmallMaster = true };
+                dummy.ModHeader.Author = "FaceDiversityApp";
+                dummy.ModHeader.Description = $"Empty ESL-flagged plugin whose only job is to make the game load {OwnerStem(i)}.bsa / \"{OwnerStem(i)} - Textures.bsa\" (overflow archives of {outName}). Keep it enabled with {outName}.";
+                dummy.WriteToBinary(Path.Combine(outFolder, dk.FileName), new BinaryWriteParameters { MastersListContent = MastersListContentOption.Iterate });
+                bsaNotes.Add($"Dummy plugin {dk.FileName} written (empty, ESL-flagged): enable it alongside {outName} so its archives load.");
+            }
+        }
+
         var rd = new System.Text.StringBuilder();
         rd.Append($"{outName} — FaceDiversityApp LIBRARY BUILD (personal use only; do not redistribute)\n\n");
         rd.Append($"{donors.Count} donor NPCs (never placed in the world), one per curated face, each carrying that face's head parts,\n");
@@ -361,10 +423,15 @@ static class LibraryBuild
                 + $"Map of donor <-> original face: {stem}_map.yaml / .csv (next to this file).\n");
         rd.Append("Textures: body skin at vanilla paths is NOT baked (your skin mod supplies it); a face's brows/eyes/hair from other\n"
                 + "packs were baked when found in the mod folders searched. Run 'Verify assets' on this folder to list what's still missing.\n");
+        if (bsaNotes.Count > 0)
+            rd.Append("\nARCHIVES: assets are packed into this plugin's own BSA(s), which the game loads automatically for a plugin of\n"
+                    + "this name (no MO2 Archives-tab step). A loose file with the same path would override them."
+                    + (dummyPlugins.Count > 0 ? "\n  A group over the 4 GiB per-archive limit was split: the extra archives hang off empty ESL-flagged dummy\n  plugins named below — ENABLE THEM TOO (they use no load-order slot)." : "")
+                    + "\n  " + string.Join("\n  ", bsaNotes) + "\n");
         if (missingFaceGen.Count > 0) rd.Append($"\nWARNING missing FaceGen ({missingFaceGen.Count}):\n  " + string.Join("\n  ", missingFaceGen) + "\n");
         File.WriteAllText(Path.Combine(outFolder, "README.txt"), rd.ToString());
 
         return new Result(donors.Count, newRecs, outMod.IsSmallMaster, copiedByType, masters, extraMasters, unresolved,
-                          missingMasters, bakedAssets, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, esp);
+                          missingMasters, bakedAssets, missingFaceGen, danglingDropped, facesPerPlugin, facesPerRace, esp, bsaNotes);
     }
 }
