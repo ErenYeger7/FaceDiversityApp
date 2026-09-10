@@ -232,8 +232,10 @@ static class LoadOrderScan
             if (raceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)) continue;
             if (!HumanoidRace(n.Race.FormKey)) continue;
             if (prefixes.Count > 0 && prefixes.Any(p => Categories.MatchesPrefix(n.EditorID ?? "", p))) { exCat++; continue; }
+            // named characters belong to the all_males path whatever their CURRENT sex (an installed all-males
+            // build already made the winning override female — a base-master run must not reface them again)
             if (excludeUniqueNamedMales && n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Unique)
-                && !n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female) && !string.IsNullOrWhiteSpace(n.Name?.String)) { exUnique++; continue; }
+                && !string.IsNullOrWhiteSpace(n.Name?.String)) { exUnique++; continue; }
             res.Add(n);
         }
         if (excluded is not null) { excluded.ByCategoryCount = exCat; excluded.UniqueCount = exUnique; }
