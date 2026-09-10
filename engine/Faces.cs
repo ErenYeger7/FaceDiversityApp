@@ -182,7 +182,8 @@ static class Faces
             string NameOf(FormKey fk) => cache.TryResolve<IRaceGetter>(fk, out var r) && !string.IsNullOrEmpty(r.EditorID) ? r.EditorID! : RaceOf(fk);
             var m = new Dictionary<string, int>(); var f = new Dictionary<string, int>();
             var code = new Dictionary<string, string>(); var name = new Dictionary<string, string>();
-            foreach (var n in LoadOrderScan.ModNpcs(lo, modFile, RaceOf))
+            bool bm = LoadOrderScan.IsBaseMaster(modFile);
+            foreach (var n in LoadOrderScan.ModNpcs(lo, modFile, RaceOf, bm ? LoadOrderScan.CategoryPrefixes() : null, bm))
             {
                 var key = RaceOf(n.Race.FormKey);
                 var d = Fem(n) ? f : m; d[key] = d.GetValueOrDefault(key) + 1;
@@ -196,7 +197,8 @@ static class Faces
 
     // Per-MOD info for the UI: target count, the templated NPCs (not refaceable) and where their faces come
     // from, and how many winning leveled lists reference the targets (Boost slots).
-    public record ModInfo(int Targets, int TargetsM, int TargetsF, LoadOrderScan.TemplateSummary Templates, int Lists);
+    public record ModInfo(int Targets, int TargetsM, int TargetsF, LoadOrderScan.TemplateSummary Templates, int Lists,
+                          bool BaseMaster, int ExcludedByCategory, int ExcludedUniqueMales);
     public static ModInfo InfoMod(string game, IEnumerable<string> orderedPaths, string modFile)
     {
         using var esm = SkyrimMod.CreateFromBinaryOverlay(new ModPath(game), GameCfg.Release);
@@ -205,11 +207,14 @@ static class Faces
         var lo = LoadOrderScan.Build(orderedPaths);
         try
         {
-            var targets = LoadOrderScan.ModNpcs(lo, modFile, RaceOf);
+            bool bm = LoadOrderScan.IsBaseMaster(modFile);
+            var ex = new LoadOrderScan.Excluded();
+            var targets = LoadOrderScan.ModNpcs(lo, modFile, RaceOf, bm ? LoadOrderScan.CategoryPrefixes() : null, bm, ex);
             var keys = new HashSet<FormKey>(targets.Select(t => t.FormKey));
             int lists = lo.PriorityOrder.LeveledNpc().WinningOverrides()
                 .Count(ll => ll.Entries is not null && ll.Entries.Any(e => e.Data is not null && keys.Contains(e.Data.Reference.FormKey)));
-            return new ModInfo(targets.Count, targets.Count(t => !Fem(t)), targets.Count(Fem), LoadOrderScan.TemplatesOf(lo, modFile), lists);
+            return new ModInfo(targets.Count, targets.Count(t => !Fem(t)), targets.Count(Fem), LoadOrderScan.TemplatesOf(lo, modFile), lists,
+                               bm, ex.ByCategoryCount, ex.UniqueCount);
         }
         finally { LoadOrderScan.DisposeLoadOrder(lo); }
     }

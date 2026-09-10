@@ -629,6 +629,7 @@ async function onCategory(){
       const mi = await api('/api/modinfo?target='+encodeURIComponent($('#targetMod').value||''));
       const t = mi.templates||{};
       sw.innerHTML = `<b>${esc($('#targetMod').value)}</b>: <b>${mi.targets}</b> own-traits NPCs are the targets (${mi.targetsM} M / ${mi.targetsF} F — unique or not; with <b>Feminize</b> on the males become women). `
+        + (mi.baseMaster ? `Left to their dedicated categories: <b>${mi.excludedByCategory}</b> NPCs of the prefix groups (bandits, forsworn, …) and <b>${mi.excludedUniqueMales}</b> unique named males (All loaded males). ` : '')
         + `Boost can inject into <b>${mi.lists}</b> leveled list${mi.lists===1?'':'s'} that reference them. `
         + (t.templated ? `<b>${t.templated}</b> NPCs use a <i>template</i> and have no face of their own — not refaced; their faces come from ${t.leavesInMod} leaves in this mod (covered here)${t.leavesVanilla?`, ${t.leavesVanilla} vanilla (use the vanilla categories)`:''}${t.leavesOtherMods?`, ${t.leavesOtherMods} in other mods (${esc((t.otherMods||[]).join(', '))})`:''}${t.unresolved?`, ${t.unresolved} unresolved`:''}.` : 'No templated NPCs.');
     }catch(e){ sw.innerHTML = `<div>✘ ${esc(e&&e.message?e.message:e)}</div>`; }

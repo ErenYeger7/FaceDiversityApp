@@ -198,8 +198,19 @@ static class LoadOrderScan
     // (a single NPC, or the leaves of a leveled character list) — classified by where those leaves live.
     public record TemplateSummary(int Templated, int LeavesInMod, int LeavesVanilla, int LeavesOtherMods, int Unresolved, List<string> OtherMods);
 
-    public static List<INpcGetter> ModNpcs(LoadOrder<IModListingGetter<ISkyrimModGetter>> lo, string modFile, Func<FormKey, string> raceOf)
+    // For a BASE MASTER target, NPCs that already have a dedicated path are set aside: every EditorID matching
+    // a prefix category (EncBandit, EncForsworn, ...) and the unique named males (the all_males scan) — so
+    // "Skyrim.esm" means the vanilla population those categories do NOT cover (hold guards, city folk, ...).
+    public class Excluded { public int ByCategoryCount; public int UniqueCount; }
+    // the dedicated-path exclusions apply to a base-master target only
+    public static bool IsBaseMaster(string plugin) => BaseMasters.Contains(plugin, StringComparer.OrdinalIgnoreCase);
+    public static IEnumerable<string> CategoryPrefixes() =>
+        Categories.All.Where(c => !string.IsNullOrWhiteSpace(c.TargetPrefix)).Select(c => c.TargetPrefix!);
+    public static List<INpcGetter> ModNpcs(LoadOrder<IModListingGetter<ISkyrimModGetter>> lo, string modFile, Func<FormKey, string> raceOf,
+                                           IEnumerable<string>? excludePrefixes = null, bool excludeUniqueNamedMales = false, Excluded? excluded = null)
     {
+        var prefixes = excludePrefixes?.ToList() ?? new List<string>();
+        int exCat = 0, exUnique = 0;
         FormKey npcKw = default; bool haveKw = false;
         foreach (var kw in lo.PriorityOrder.Keyword().WinningOverrides())
             if (kw.EditorID == "ActorTypeNPC") { npcKw = kw.FormKey; haveKw = true; break; }
@@ -220,8 +231,12 @@ static class LoadOrderScan
             if (n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) && !n.Template.IsNull) continue;
             if (raceOf(n.Race.FormKey).Contains("Child", StringComparison.OrdinalIgnoreCase)) continue;
             if (!HumanoidRace(n.Race.FormKey)) continue;
+            if (prefixes.Count > 0 && prefixes.Any(p => Categories.MatchesPrefix(n.EditorID ?? "", p))) { exCat++; continue; }
+            if (excludeUniqueNamedMales && n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Unique)
+                && !n.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female) && !string.IsNullOrWhiteSpace(n.Name?.String)) { exUnique++; continue; }
             res.Add(n);
         }
+        if (excluded is not null) { excluded.ByCategoryCount = exCat; excluded.UniqueCount = exUnique; }
         return res;
     }
 

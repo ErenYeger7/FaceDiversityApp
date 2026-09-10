@@ -132,8 +132,11 @@ static class Generate
             loScan = LoadOrderScan.Build(paths);
             if (modCat)
             {
-                targets = LoadOrderScan.ModNpcs(loScan, targetMod!, RaceOf);
+                bool bm = LoadOrderScan.IsBaseMaster(targetMod!);
+                var ex = new LoadOrderScan.Excluded();
+                targets = LoadOrderScan.ModNpcs(loScan, targetMod!, RaceOf, bm ? LoadOrderScan.CategoryPrefixes() : null, bm, ex);
                 var ts = LoadOrderScan.TemplatesOf(loScan, targetMod!);
+                if (bm) Console.WriteLine($"Base master {targetMod}: {ex.ByCategoryCount} NPCs covered by the prefix categories and {ex.UniqueCount} unique named males (all_males) are left to their dedicated paths.");
                 Console.WriteLine($"Mod {targetMod}: {targets.Count} own-traits NPCs ({targets.Count(t => !Fem(t))} M / {targets.Count(Fem)} F) as targets; "
                                 + $"{ts.Templated} templated NPCs have no face of their own (their faces come from: {ts.LeavesInMod} leaves in this mod (targets here), {ts.LeavesVanilla} vanilla, {ts.LeavesOtherMods} other mods{(ts.OtherMods.Count > 0 ? " [" + string.Join(", ", ts.OtherMods) + "]" : "")}, {ts.Unresolved} unresolved).");
             }
