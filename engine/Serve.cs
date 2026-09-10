@@ -294,12 +294,12 @@ static class Serve
                     catch (Exception e) { Send(ctx, 400, "application/json", Json(new { error = e.Message })); }
                     return;
                 }
-                // per-mod category: the active plugins a target can be picked from (base masters excluded), and
-                // one plugin's target/templated summary for the UI note
+                // per-mod category: every active plugin a target can be picked from — the base masters included
+                // (the vanilla hold guards, city NPCs and every Enc* group live in Skyrim.esm/the DLC), and one
+                // plugin's target/templated summary for the UI note
                 case "/api/target-mods":
                 {
-                    var plugins = ResolveActiveLoadOrder().Select(Path.GetFileName)
-                        .Where(f => f is not null && !Classify.BaseMasters.Contains(f!)).ToList();
+                    var plugins = ResolveActiveLoadOrder().Select(Path.GetFileName).Where(f => f is not null).Select(f => f!).ToList();
                     Send(ctx, 200, "application/json", Json(plugins)); return;
                 }
                 case "/api/modinfo":
