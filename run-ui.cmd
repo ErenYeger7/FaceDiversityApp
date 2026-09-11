@@ -4,13 +4,12 @@ setlocal
 set PORT=8930
 cd /d "%~dp0engine"
 
-REM Stop a server still running from an earlier launch on this port: it would keep the OLD engine alive
-REM (and lock the build output) while serving the NEW page from disk -> "undefined" values, dead buttons.
-REM (no parentheses inside this block: cmd would read one as the block's end)
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"') do (
-  echo Stopping the previous FaceDiversityApp server, PID %%p ...
-  taskkill /PID %%p /F >nul 2>&1
-)
+REM Stop a server still running from an earlier launch: it would keep the OLD engine alive (and lock the
+REM build output) while serving the NEW page from disk -> "undefined" values, dead buttons. The server
+REM listens through http.sys, so netstat reports the port as owned by PID 4 (System) - the process has to
+REM be found by its command line, not by the port.
+echo Stopping any previous FaceDiversityApp server...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | Where-Object { $_.CommandLine -like '*facediv.dll*serve*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Write-Host ('  stopped PID ' + $_.ProcessId) }"
 
 echo Building FaceDiversityApp engine...
 dotnet build --configuration Release -nologo

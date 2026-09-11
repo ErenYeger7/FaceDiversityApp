@@ -588,16 +588,28 @@ static class Serve
         }
         if (req.FeminineNames && File.Exists(FeminineNamesPath())) { a.Add("--feminine-names"); a.Add(FeminineNamesPath()); }
         if (req.FeminineHeights && File.Exists(FeminineHeightsPath())) { a.Add("--feminine-heights"); a.Add(FeminineHeightsPath()); }
-        if (req.Runtime) a.Add("--skypatcher");   // SkyPatcher runtime mode: copyVisualStyle lines, no plugin/FaceGen
+        if (req.Runtime) a.Add("--skypatcher");   // SkyPatcher runtime mode: copyVisualStyle lines, no overrides (leaf FaceGen copies for template-spawned targets)
         // Bake textures: hand the engine the enabled mod folders (MO2 priority) so it can resolve + bake
         // cross-mod face textures (brows/eyes) into a self-contained output.
+        // Runtime mode needs them too: a library build's FaceGen (leaf copies for template-spawned targets) is
+        // read from whichever installed mod folder holds the build's plugin.
         string? assetDirsFile = null;
-        if (req.BakeTextures)
+        if (req.BakeTextures || req.Runtime)
         {
-            var dirs = LoadOrderScan.EnabledMods(Path.Combine(Profiles, Profile), Mods).Select(m => m.folder);
+            var dirs = LoadOrderScan.EnabledMods(Path.Combine(Profiles, Profile), Mods).Select(m => m.folder).ToList();
+            // A library build not (yet) installed as a mod is still readable from the app's own build output —
+            // after the installed mods, so an installed copy wins.
+            foreach (var s in req.Sources)
+                if (LibraryMap.IsLibraryPath(s.Path))
+                {
+                    // a SET's folder is named after the set (= the map file's stem, "FDA_Library"), not its first plugin
+                    var built = Path.Combine(OutDir, Path.GetFileNameWithoutExtension(s.Path));
+                    if (Directory.Exists(built) && !dirs.Contains(built, StringComparer.OrdinalIgnoreCase)) dirs.Add(built);
+                }
             assetDirsFile = Path.Combine(Path.GetTempPath(), $"facediv-assetdirs-{Guid.NewGuid():N}.txt");
             File.WriteAllLines(assetDirsFile, dirs);
-            a.Add("--bake-textures"); a.Add("--asset-dirs"); a.Add(assetDirsFile);
+            if (req.BakeTextures) a.Add("--bake-textures");
+            a.Add("--asset-dirs"); a.Add(assetDirsFile);
         }
         if (includeFile is not null) { a.Add("--include"); a.Add(includeFile); }
         // Race merger: collect each source's saved extra races into a TSV — `as:` overlays as

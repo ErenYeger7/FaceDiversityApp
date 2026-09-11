@@ -310,11 +310,31 @@ static class Generate
         // textures are left to load normally). Skin/body textures are skipped (huge + shared; baking one
         // as a loose file would override that skin globally — the source skin overhaul provides those).
         LoadOrderAssets? bakeResolver = null; int bakedCrossMod = 0;
-        if (bakeTextures && assetDirsPath is not null && File.Exists(assetDirsPath))
+        var assetDirs = new List<(string name, string folder)>();   // enabled mod folders, MO2 priority (when Serve hands them over)
+        if (assetDirsPath is not null && File.Exists(assetDirsPath))
+            assetDirs = File.ReadAllLines(assetDirsPath).Select(l => l.Trim()).Where(l => l.Length > 0)
+                            .Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList();
+        if (bakeTextures && assetDirs.Count > 0) bakeResolver = new LoadOrderAssets(assetDirs);
+
+        // Where a LIBRARY build's FaceGen lives: the installed mod folder that holds its plugin (loose or in its
+        // BSAs), else the app's own build output next to this output folder. Indexed once per plugin — only that
+        // folder's archives, never the whole load order's.
+        var libFolderOf = new Dictionary<string, SourceAssets?>(StringComparer.OrdinalIgnoreCase);
+        SourceAssets? LibraryAssets(string plugin)
         {
-            var dirs = File.ReadAllLines(assetDirsPath).Select(l => l.Trim()).Where(l => l.Length > 0)
-                           .Select(p => (Path.GetFileName(p.TrimEnd('/', '\\')), p)).ToList();
-            bakeResolver = new LoadOrderAssets(dirs);
+            if (libFolderOf.TryGetValue(plugin, out var sa)) return sa;
+            var candidates = assetDirs.Select(d => d.folder).ToList();
+            var outParent = Path.GetDirectoryName(Path.GetFullPath(outFolder));
+            if (outParent is not null)
+                foreach (var lm in libraryMaps)
+                {
+                    var m = LibraryMap.Load(lm);
+                    if (m is not null) candidates.Add(Path.Combine(outParent, m.Plugin));
+                    candidates.Add(Path.Combine(outParent, Path.GetFileNameWithoutExtension(lm)));
+                }
+            var folder = candidates.FirstOrDefault(c => File.Exists(Path.Combine(c, plugin)));
+            if (folder is not null && !assets.ContainsKey(folder)) assets[folder] = new SourceAssets(folder);
+            return libFolderOf[plugin] = folder is null ? null : assets[folder];
         }
         static bool IsSharedSkin(string rel)
         {
@@ -421,6 +441,38 @@ static class Generate
         }
         int skinOps = 0;   // runtime lines carrying skin= (skinCarried counts donors, once each)
 
+        // ---- Runtime-mode LEAF FaceGen. copyVisualStyle redirects a DIRECTLY placed actor to the donor's FaceGen
+        // files (named males: fine). An actor spawned through a Use-Traits template chain — every hold guard:
+        // placed record -> GuardWhiterunSonsTemplate -> LvlGuardSons -> LCharGuardSons... -> EncGuardSonsM04 —
+        // takes its traits from the LEAF picked at spawn, and the engine then loads FaceGen by the LEAF's own
+        // FormID: the vanilla male head under Skyrim.esm\000AA936.nif, while SkyPatcher has already swapped the
+        // leaf's head parts to the donor's -> a female hair on a baked male head with a dark tint (the guard
+        // report). ESP mode never hit this because it writes the donor's FaceGen under the leaf's key; do the
+        // same here for every target the engine can reach through a template (non-unique, or referenced by a
+        // traits template / leveled list) and for every Boost clone (they only ever spawn from lists).
+        var templateRefs = new HashSet<FormKey>();
+        if (skypatcher && (loScan ?? loBase) is { } loT)
+        {
+            foreach (var n in loT.PriorityOrder.Npc().WinningOverrides())
+                if (!n.Template.IsNull && n.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits)) templateRefs.Add(n.Template.FormKey);
+            foreach (var ll in loT.PriorityOrder.LeveledNpc().WinningOverrides())
+                foreach (var e in ll.Entries ?? new List<ILeveledNpcEntryGetter>())
+                    if (e.Data is not null && !e.Data.Reference.IsNull) templateRefs.Add(e.Data.Reference.FormKey);
+        }
+        bool LeafReached(INpcGetter t) => !t.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Unique) || templateRefs.Contains(t.FormKey);
+        int leafFaceGen = 0, leafDirect = 0;   // leaf copies written / targets left to SkyPatcher's redirect (directly placed uniques)
+        // The donor's FaceGen bytes: a library donor's from the build's folder (its own key there); an in-plugin
+        // donor's from the picked source (the source's key) — the same files Donor() re-keyed under this plugin.
+        void CopyLeafFaceGen(Face face, Npc dn, uint tgtId, string tgtSub, string what)
+        {
+            SourceAssets? src; string sub; uint id;
+            if (face.Library) { src = LibraryAssets(dn.FormKey.ModKey.FileName); sub = dn.FormKey.ModKey.FileName; id = dn.FormKey.ID; }
+            else { src = assets[face.Folder]; sub = face.Npc.FormKey.ModKey.FileName; id = face.Npc.FormKey.ID; }
+            var fg = src is null ? null : CopyFaceGen(src, sub, id, tgtId, outFolder, tgtSub);
+            if (fg is null) missingFaceGen.Add($"LEAF {what} <= {dn.EditorID} ({sub}|{id:X}){(src is null ? " — library build folder not found (is the build installed and enabled?)" : "")}");
+            else leafFaceGen++;
+        }
+
         foreach (var t in targets)
         {
             var race = RaceOf(t.Race.FormKey);
@@ -485,6 +537,8 @@ static class Generate
                          : $"; {t.EditorID} \"{t.Name?.String}\" <= donor {dn.EditorID} = {face.Npc.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}")
                          + (face.Overlay ? " [overlay: keeps target race]" : "");
                 runtimeTargets.Add(((t.FormKey.ModKey.FileName, t.FormKey.ID), baseOps, note));
+                if (LeafReached(t)) CopyLeafFaceGen(face, dn, t.FormKey.ID, t.FormKey.ModKey.FileName, $"{t.EditorID} ({t.FormKey.ModKey.FileName}|{t.FormKey.ID:X})");
+                else leafDirect++;
                 continue;
             }
 
@@ -594,6 +648,7 @@ static class Generate
                             femRace[(outName, fk.ID)] = face.Overlay ? race : RaceOf(dn.Race.FormKey);
                         }
                         runtimeTargets.Add(((outName, fk.ID), ops, $"; BOOST clone {clone.EditorID} (of {donor.EditorID}) <= donor {dn.EditorID} \"{face.Npc.Name?.String}\" from {face.Source}"));
+                        CopyLeafFaceGen(face, dn, fk.ID, outName, $"BOOST {clone.EditorID}");   // a clone only ever spawns from a list
                     }
                     else
                     {
@@ -699,7 +754,10 @@ static class Generate
         }
         else Console.WriteLine($"No plugin written — every face comes from a library build ({(libraryPlugins.Count > 0 ? string.Join(", ", libraryPlugins) + " referenced" : "no donor used")}); the output is the SkyPatcher config only.");
         if (skypatcher)
+        {
             Console.WriteLine($"SkyPatcher runtime mode: the plugin holds {donorByFace.Count} DONOR faces (never placed); {runtimeTargets.Count} targets get their face at load via copyVisualStyle from them (no overrides); {raceSwitched} adopt the donor's race via race=; {skinOps} carry the donor's per-NPC skin via skin=; {weightMatched} take the donor's weight via weight= (neck seam otherwise).");
+            Console.WriteLine($"Leaf FaceGen: {leafFaceGen} targets/clones the game reaches through a traits template or leveled list (guards, bandits...) also get the donor's FaceGen written under their OWN FormID (the engine loads the leaf's files there, not the redirect); {leafDirect} directly placed uniques rely on SkyPatcher's redirect alone.");
+        }
 
         int totalAssigned = report.Values.Sum(v => v.assigned), totalSkipped = report.Values.Sum(v => v.skipped);
         Console.WriteLine("Source classification:");
@@ -882,8 +940,12 @@ static class Generate
                     + "  below exactly as in ESP mode: a keep source stays a master; a disable/standalone source's head parts are\n"
                     + "  copied in, so the plugin travels to another MO2 instance on its own.\n"
                     + (libraryPlugins.Count > 0 ? $"  Faces from LIBRARY BUILD(S) {string.Join(", ", libraryPlugins)} are referenced there directly — keep those builds installed and enabled.\n" : "")
+                    + $"  Leaf FaceGen: {leafFaceGen} targets/clones that the game spawns through a traits template or leveled list (hold guards,\n"
+                    + "  bandits, Boost clones...) ALSO carry the donor's FaceGen under their own FormID in this mod — the engine loads a\n"
+                    + "  template-spawned actor's face by the LEAF's FormID, where the redirect does not reach (female hair on a baked\n"
+                    + $"  male head + dark tint otherwise); {leafDirect} directly placed uniques use the redirect alone.\n"
                     + (writePlugin ? $"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n"
-                                   : "No plugin in this output: every face comes from the library build(s) above, so this is the SkyPatcher config alone.\n"));
+                                   : "No plugin in this output: every face comes from the library build(s) above, so this is the SkyPatcher config plus the leaf FaceGen files (loose; they load without a plugin).\n"));
         else
         {
             rd.Append($"Plugin type: {(droppedEsl ? $"FULL ESP — {newRecs} new records exceed the 2048 ESPFE limit, so this uses a load-order slot" : $"ESL-flagged (ESPFE), {newRecs} new records")}.\n");
